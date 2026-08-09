@@ -118,3 +118,4 @@ report.DiskIO = [ {device, mountpoint, read_bytes, write_bytes, read_iops, write
 - 复用 `AGENT_INCLUDE_MOUNTPOINTS`,**不新造**磁盘 IO 专用旗标(初稿的 `AGENT_DISK_IO_MOUNTPOINTS` 废弃)。
 - module path 保持 `github.com/komari-monitor/komari-agent`(二开 fork 常规做法,保持 go.sum/内部 import 不变)。
 - **部署注意**:agent 默认 6h 自动更新,指向上游 komari-monitor;自建 repo 部署时需 `--disable-auto-update`,避免二开被上游覆盖。此属部署阶段,本次代码不处理。
+- **平台差异(macOS/开发机)**:`disk.Partitions` 在 macOS 上报设备名带切片后缀(`/dev/disk3s1s1`),而 `disk.IOCounters()` 只返回整盘键(`disk0`/`disk4`),两者对不上 → `disk_io` 恒为空数组。**仅影响开发机**,Linux(beszel→komari 迁移目标 tebi/pxed/googlevps)上设备名一致(`vda5`/`sda1`),设计如此,不是 bug;无需为 macOS 加匹配逻辑。

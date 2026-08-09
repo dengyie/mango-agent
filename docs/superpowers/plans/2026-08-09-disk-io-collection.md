@@ -1,6 +1,6 @@
 # Komari Agent 磁盘 IO 采集二开 — 实现计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 给 komari-agent 增加磁盘 IO 速率采集与上报（`report.disk_io`），无关的 server 面板展示本次不做。
 
@@ -38,7 +38,7 @@
     - `func diskSafeDelta(cur, prev uint64) uint64`
   - `type mountTarget struct { Mountpoint, Device string }`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `monitoring/unit/disk_io_test.go`：
 
@@ -178,12 +178,12 @@ func TestComputeDiskIORatesFirstSample(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd /Users/mango/project/katabump-probe/vps-monitor && go test ./monitoring/unit/ -run 'TestTrimDevPrefix|TestDiskSafeDelta|TestFilterMountTargets|TestComputeDiskIORates' -v`
 Expected: FAIL，报 `undefined: trimDevPrefix` / `filterMountTargets` / `computeDiskIORates` / `diskSafeDelta`。
 
-- [ ] **Step 3: 写实现**
+- [x] **Step 3: 写实现**
 
 `monitoring/unit/disk_io.go`：
 
@@ -338,12 +338,12 @@ func DiskIO() []DiskIOStat {
 }
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cd /Users/mango/project/katabump-probe/vps-monitor && go test ./monitoring/unit/ -run 'TestTrimDevPrefix|TestDiskSafeDelta|TestFilterMountTargets|TestComputeDiskIORates' -v`
 Expected: 全部 PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /Users/mango/project/katabump-probe/vps-monitor
@@ -362,7 +362,7 @@ git commit -m "feat(disk-io): 新增磁盘 IO 速率采集单元与单测"
 - Consumes: `unit.DiskIO()` → `[]unit.DiskIOStat`（Task 1 产出）
 - Produces: `report.DiskIO []unit.DiskIOStat json:"disk_io,omitempty"`（最终 JSON 片段）
 
-- [ ] **Step 1: report 结构加字段**
+- [x] **Step 1: report 结构加字段**
 
 `monitoring/monitoring.go` 的 `report` 结构，在 `Disk usageReport` 字段后加一行：
 
@@ -372,7 +372,7 @@ git commit -m "feat(disk-io): 新增磁盘 IO 速率采集单元与单测"
 	Network     networkReport     `json:"network"`
 ```
 
-- [ ] **Step 2: GenerateReport 里填充**
+- [x] **Step 2: GenerateReport 里填充**
 
 `monitoring/monitoring.go` 第 92-93 行 `disk := unit.Disk()` / `data.Disk = ...` 之后加：
 
@@ -383,17 +383,17 @@ git commit -m "feat(disk-io): 新增磁盘 IO 速率采集单元与单测"
 	data.DiskIO = unit.DiskIO()
 ```
 
-- [ ] **Step 3: 编译验证**
+- [x] **Step 3: 编译验证**
 
 Run: `cd /Users/mango/project/katabump-probe/vps-monitor && go build ./...`
 Expected: 无错误输出。
 
-- [ ] **Step 4: 快速冒烟（可选，本机有 /dev 属性时）**
+- [x] **Step 4: 快速冒烟（可选，本机有 /dev 属性时）**
 
 Run: `cd /Users/mango/project/katabump-probe/vps-monitor && go run . --help 2>&1 | head -5 || go test ./monitoring/ -run TestDiskIONothing -count=1`
 Expected: 编译通过即可；若本机无法跑 agent，跳过冒烟，以 `go build` 通过为准。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /Users/mango/project/katabump-probe/vps-monitor
@@ -407,17 +407,17 @@ git commit -m "feat(disk-io): 上报磁盘 IO 速率到 report.disk_io"
 
 **Files:** 无（仅验证 + 提交）
 
-- [ ] **Step 1: go vet**
+- [x] **Step 1: go vet**
 
 Run: `cd /Users/mango/project/katabump-probe/vps-monitor && go vet ./...`
 Expected: 无输出（成功）。
 
-- [ ] **Step 2: 全量测试**
+- [x] **Step 2: 全量测试**
 
 Run: `cd /Users/mango/project/katabump-probe/vps-monitor && go test ./monitoring/...`
 Expected: 全部 PASS，无新增失败。
 
-- [ ] **Step 3: 确认 JSON 形状（可选自查）**
+- [x] **Step 3: 确认 JSON 形状（可选自查）**
 
 小脚本验证 `disk_io` 字段名与 `omitempty` 行为（当无 IO 或无物理盘时字段不出现）：
 
@@ -431,7 +431,7 @@ grep -n 'disk_io\|read_bytes\|write_bytes\|read_iops\|write_iops' monitoring/uni
 ```
 Expected: 四组字段名与 spec §7 完全一致。
 
-- [ ] **Step 4: 更新任务状态 + 提交（若 Task 1/2 已各自提交，本步仅确认 clean）**
+- [x] **Step 4: 更新任务状态 + 提交（若 Task 1/2 已各自提交，本步仅确认 clean）**
 
 ```bash
 cd /Users/mango/project/katabump-probe/vps-monitor
