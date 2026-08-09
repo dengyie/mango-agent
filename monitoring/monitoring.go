@@ -17,6 +17,7 @@ type report struct {
 	Swap        usageReport       `json:"swap"`
 	Load        loadReport        `json:"load"`
 	Disk        usageReport       `json:"disk"`
+	DiskIO      []unit.DiskIOStat `json:"disk_io,omitempty"`
 	Network     networkReport     `json:"network"`
 	Connections connectionsReport `json:"connections"`
 	GPU         interface{}       `json:"gpu,omitempty"`
@@ -91,6 +92,8 @@ func GenerateReport() []byte {
 
 	disk := unit.Disk()
 	data.Disk = usageReport{Total: disk.Total, Used: disk.Used}
+
+	data.DiskIO = unit.DiskIO()
 
 	totalUp, totalDown, networkUp, networkDown, err := unit.NetworkSpeed()
 	if err != nil {
