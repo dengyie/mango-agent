@@ -1,0 +1,12 @@
+__debug*
+__pycache__/
+agent.json
+.vscode/
+komari-agent.exe
+komari-agent
+.komari-agent.exe.old
+build/
+auto-discovery.json
+fake-agent-client.json
+net_static.json
+config.json
