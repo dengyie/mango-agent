@@ -2,6 +2,8 @@ package monitoring
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/shirou/gopsutil/v4/disk"
@@ -72,16 +74,72 @@ func Disk() DiskInfo {
 			}
 		}
 	}
-	// ForceDiskTotal (panel quota) 覆盖 Total；Used 不超过配额（与 mem force 一致）。
-	// Pterodactyl 下 /home/container 常为宿主机共享 FS 的 df（Total 虚高），
-	// 面板磁盘配额只能靠 force 上报。
+	// ForceDiskTotal (panel quota) 覆盖 Total（面板配额，字节）。
+	// Pterodactyl/容器下 /home/container 的 statfs 报告的是宿主 overlay 的
+	// Total/Used（虚高 ~百 GiB），既不等于面板配额，Used 也不是容器目录真实占用。
+	// 面板本身用 `du -sb <mount>` 取真实占用（apparent size）。故 force 时：
+	//   Total = 面板配额；Used = include-mountpoint 目录实际占用（walk，等价 du -sb）。
+	// 目录 walk 失败或未指定单一挂载点时，退回到把 statfs Used 截断到配额。
 	if flags.ForceDiskTotal > 0 {
+		diskinfo.Total = flags.ForceDiskTotal
+		if used, ok := forcedDiskUsed(); ok {
+			diskinfo.Used = used
+		}
 		if diskinfo.Used > flags.ForceDiskTotal {
 			diskinfo.Used = flags.ForceDiskTotal
 		}
-		diskinfo.Total = flags.ForceDiskTotal
 	}
 	return diskinfo
+}
+
+// forcedDiskUsed 计算 force 模式下的真实磁盘占用（字节，apparent size，等价 du -sb）。
+// 优先用 AGENT_INCLUDE_MOUNTPOINTS 的第一个挂载点作为根目录；未指定则回退。
+// 返回 (used, ok)；ok=false 时调用方沿用 statfs 结果。
+func forcedDiskUsed() (uint64, bool) {
+	root := ""
+	if flags.IncludeMountpoints != "" {
+		for _, mp := range strings.Split(flags.IncludeMountpoints, ";") {
+			mp = strings.TrimSpace(mp)
+			if mp != "" {
+				root = mp
+				break
+			}
+		}
+	}
+	if root == "" {
+		return 0, false
+	}
+	return dirApparentSize(root)
+}
+
+// dirApparentSize 递归累加目录下常规文件的 apparent size（等价 du -sb）。
+// 不跟随符号链接，跳过无法读取的项，避免因单个错误中断统计。
+func dirApparentSize(root string) (uint64, bool) {
+	var total uint64
+	walked := false
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			// 跳过不可访问项（权限/竞态），不整体失败
+			return nil
+		}
+		walked = true
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		// 只统计常规文件（排除符号链接/设备/socket）
+		if info.Mode().IsRegular() {
+			total += uint64(info.Size())
+		}
+		return nil
+	})
+	if err != nil || !walked {
+		return 0, false
+	}
+	return total, true
 }
 
 // isPhysicalDisk 判断分区是否为物理磁盘
