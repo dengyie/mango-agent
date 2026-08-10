@@ -19,7 +19,7 @@ import (
 )
 
 var (
-	CurrentVersion string = "Snapshot-260810-diskforce"
+	CurrentVersion string = "Snapshot-260810-diskforce-cache"
 	Repo           string = "komari-monitor/komari-agent"
 )
 
