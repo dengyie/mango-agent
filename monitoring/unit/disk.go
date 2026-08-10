@@ -72,6 +72,15 @@ func Disk() DiskInfo {
 			}
 		}
 	}
+	// ForceDiskTotal (panel quota) 覆盖 Total；Used 不超过配额（与 mem force 一致）。
+	// Pterodactyl 下 /home/container 常为宿主机共享 FS 的 df（Total 虚高），
+	// 面板磁盘配额只能靠 force 上报。
+	if flags.ForceDiskTotal > 0 {
+		if diskinfo.Used > flags.ForceDiskTotal {
+			diskinfo.Used = flags.ForceDiskTotal
+		}
+		diskinfo.Total = flags.ForceDiskTotal
+	}
 	return diskinfo
 }
 

@@ -2,9 +2,11 @@ package monitoring
 
 import (
 	"bufio"
+	"math"
 	"os"
 	"runtime"
 	"strings"
+	"time"
 
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -22,6 +24,43 @@ type CpuInfo struct {
 
 func Cpu() CpuInfo {
 	cpuinfo := CpuStaticInfo()
+
+	if flags.PreferCgroupLimits && runtime.GOOS == "linux" {
+		if cg := ReadCgroupCPU(200 * time.Millisecond); cg.OK {
+			if cg.QuotaCores > 0 {
+				cores := int(math.Ceil(cg.QuotaCores))
+				if cores < 1 {
+					cores = 1
+				}
+				cpuinfo.CPUCores = cores
+				cpuinfo.CPUPhysicalCores = cores
+			}
+			if cg.UsagePercent > 0 {
+				cpuinfo.CPUUsage = cg.UsagePercent
+				return cpuinfo
+			}
+		}
+		if flags.ForceCPUQuotaCores > 0 {
+			coresF := flags.ForceCPUQuotaCores
+			cores := int(math.Ceil(coresF))
+			if cores < 1 {
+				cores = 1
+			}
+			cpuinfo.CPUCores = cores
+			cpuinfo.CPUPhysicalCores = cores
+			// Scale host-wide % into quota-relative %: host% * hostLogical / quotaCores
+			hostN, _ := cpu.Counts(true)
+			if hostN < 1 {
+				hostN = 1
+			}
+			percentages, err := cpu.Percent(200*time.Millisecond, false)
+			if err == nil && len(percentages) > 0 {
+				scaled := percentages[0] * float64(hostN) / coresF
+				cpuinfo.CPUUsage = scaled
+			}
+			return cpuinfo
+		}
+	}
 
 	percentages, err := cpu.Percent(0, false)
 	if err == nil && len(percentages) > 0 {
@@ -55,6 +94,28 @@ func CpuStaticInfo() CpuInfo {
 		name, err := readCPUNameFromProc()
 		if err == nil && name != "" {
 			cpuinfo.CPUName = strings.TrimSpace(name)
+		}
+	}
+
+	if flags.PreferCgroupLimits && runtime.GOOS == "linux" {
+		// Cheap quota-only read: zero sample window still parses cpu.max / cfs_quota.
+		if cg := ReadCgroupCPU(0); cg.OK && cg.QuotaCores > 0 {
+			cores := int(math.Ceil(cg.QuotaCores))
+			if cores < 1 {
+				cores = 1
+			}
+			cpuinfo.CPUCores = cores
+			cpuinfo.CPUPhysicalCores = cores
+			return cpuinfo
+		}
+		if flags.ForceCPUQuotaCores > 0 {
+			cores := int(math.Ceil(flags.ForceCPUQuotaCores))
+			if cores < 1 {
+				cores = 1
+			}
+			cpuinfo.CPUCores = cores
+			cpuinfo.CPUPhysicalCores = cores
+			return cpuinfo
 		}
 	}
 

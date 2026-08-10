@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -86,6 +87,30 @@ var RootCmd = &cobra.Command{
 
 		log.Println("Komari Agent", update.CurrentVersion)
 		log.Println("Github Repo:", update.Repo)
+		if flags.PreferCgroupLimits {
+			log.Println("Prefer cgroup limits: memory/CPU quotas over host /proc when finite")
+			if runtime.GOOS == "linux" {
+				if m := monitoring.ReadCgroupMemory(); m.OK {
+					log.Printf("Cgroup memory limit: %d bytes usage=%d (path %s)", m.Limit, m.Usage, m.Path)
+				} else {
+					log.Printf("Cgroup memory: unlimited or unreadable (usage=%d path=%s)", m.Usage, m.Path)
+				}
+				if c := monitoring.ReadCgroupCPU(0); c.OK {
+					log.Printf("Cgroup CPU quota: %.3f cores (path %s)", c.QuotaCores, c.Path)
+				} else {
+					log.Println("Cgroup CPU: unlimited or unreadable (fallback host/force)")
+				}
+			}
+		}
+		if flags.ForceMemoryTotal > 0 {
+			log.Printf("Force memory total: %d bytes (%.1f MiB)", flags.ForceMemoryTotal, float64(flags.ForceMemoryTotal)/1024/1024)
+		}
+		if flags.ForceCPUQuotaCores > 0 {
+			log.Printf("Force CPU quota: %.3f cores", flags.ForceCPUQuotaCores)
+		}
+		if flags.ForceDiskTotal > 0 {
+			log.Printf("Force disk total: %d bytes (%.1f MiB)", flags.ForceDiskTotal, float64(flags.ForceDiskTotal)/1024/1024)
+		}
 
 		// 设置 DNS 解析行为
 		if flags.CustomDNS != "" {
@@ -185,6 +210,10 @@ func init() {
 	RootCmd.PersistentFlags().IntVar(&flags.ProtocolVersion, "protocol-version", 2, "Report protocol version (1 or 2)")
 	RootCmd.PersistentFlags().BoolVar(&flags.DisableCompression, "disable-compression", false, "Disable v2 gzip/permessage-deflate compression")
 	RootCmd.PersistentFlags().StringVar(&flags.PreferIPVersion, "prefer-ip-version", "", "Prefer IP version for dashboard connections: 4 or 6")
+	RootCmd.PersistentFlags().BoolVar(&flags.PreferCgroupLimits, "prefer-cgroup-limits", false, "Prefer Linux cgroup memory/CPU quotas (container/Pterodactyl) over host /proc")
+	RootCmd.PersistentFlags().Uint64Var(&flags.ForceMemoryTotal, "force-memory-total", 0, "Override mem_total in bytes when cgroup is unlimited (panel quota)")
+	RootCmd.PersistentFlags().Float64Var(&flags.ForceCPUQuotaCores, "force-cpu-quota-cores", 0, "Override cpu cores (fractional ok) when cgroup is unlimited (panel quota)")
+	RootCmd.PersistentFlags().Uint64Var(&flags.ForceDiskTotal, "force-disk-total", 0, "Override disk total in bytes (panel quota)")
 	RootCmd.PersistentFlags().ParseErrorsWhitelist.UnknownFlags = true
 }
 
@@ -219,6 +248,10 @@ func loadFromEnv() {
 		case reflect.Int:
 			if intVal, err := strconv.Atoi(envValue); err == nil {
 				field.SetInt(int64(intVal))
+			}
+		case reflect.Uint64:
+			if uVal, err := strconv.ParseUint(envValue, 10, 64); err == nil {
+				field.SetUint(uVal)
 			}
 		case reflect.Float64:
 			if floatVal, err := strconv.ParseFloat(envValue, 64); err == nil {

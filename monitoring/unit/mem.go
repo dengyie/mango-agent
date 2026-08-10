@@ -182,6 +182,29 @@ func CallFree() RamInfo {
 }
 
 func Ram() RamInfo {
+	cfg := pkg_flags.GlobalConfig
+	// Container/Pterodactyl: report allocation, not host MemTotal.
+	// ForceMemoryTotal (panel quota) wins for Total when set — cgroup hard
+	// limit can be slightly higher than the panel soft/display limit.
+	// Otherwise use finite cgroup limit; usage always prefers cgroup.current.
+	if cfg.PreferCgroupLimits && runtime.GOOS == "linux" {
+		cg := ReadCgroupMemory()
+		if cfg.ForceMemoryTotal > 0 {
+			used := cg.Usage
+			if used > cfg.ForceMemoryTotal {
+				used = cfg.ForceMemoryTotal
+			}
+			return RamInfo{Total: cfg.ForceMemoryTotal, Used: used, Mode: "force"}
+		}
+		if cg.OK && cg.Limit > 0 {
+			used := cg.Usage
+			if used > cg.Limit {
+				used = cg.Limit
+			}
+			return RamInfo{Total: cg.Limit, Used: used, Mode: "cgroup"}
+		}
+	}
+
 	// Use global config
 	if pkg_flags.GlobalConfig.MemoryIncludeCache {
 		v, err := mem.VirtualMemory()
