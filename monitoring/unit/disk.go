@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/shirou/gopsutil/v4/disk"
 )
@@ -95,6 +97,10 @@ func Disk() DiskInfo {
 // forcedDiskUsed 计算 force 模式下的真实磁盘占用（字节，apparent size，等价 du -sb）。
 // 优先用 AGENT_INCLUDE_MOUNTPOINTS 的第一个挂载点作为根目录；未指定则回退。
 // 返回 (used, ok)；ok=false 时调用方沿用 statfs 结果。
+//
+// 带 60s TTL 缓存：agent 默认每 3s 采集一次（Interval=3），而目录 walk 是
+// 同步阻塞在采集循环里的。缓存避免高频全目录扫描拖慢上报周期；目录变化
+// 最多延迟 60s 反映（对配额监控可接受）。挂载点变更时 key 变化自动失效。
 func forcedDiskUsed() (uint64, bool) {
 	root := ""
 	if flags.IncludeMountpoints != "" {
@@ -109,7 +115,29 @@ func forcedDiskUsed() (uint64, bool) {
 	if root == "" {
 		return 0, false
 	}
-	return dirApparentSize(root)
+	return dirApparentSizeCached(root)
+}
+
+const diskWalkTTL = 60 * time.Second
+
+var (
+	diskWalkMu   sync.Mutex
+	diskWalkRoot string
+	diskWalkUsed uint64
+	diskWalkOK   bool
+	diskWalkAt   time.Time
+)
+
+// dirApparentSizeCached 带 TTL 缓存的目录大小计算；并发安全。
+func dirApparentSizeCached(root string) (uint64, bool) {
+	diskWalkMu.Lock()
+	defer diskWalkMu.Unlock()
+	if diskWalkRoot == root && !diskWalkAt.IsZero() && time.Since(diskWalkAt) < diskWalkTTL {
+		return diskWalkUsed, diskWalkOK
+	}
+	used, ok := dirApparentSize(root)
+	diskWalkRoot, diskWalkUsed, diskWalkOK, diskWalkAt = root, used, ok, time.Now()
+	return used, ok
 }
 
 // dirApparentSize 递归累加目录下常规文件的 apparent size（等价 du -sb）。
