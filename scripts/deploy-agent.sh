@@ -41,10 +41,14 @@ fi
 mv "$NEW" "$BIN"
 chmod +x "$BIN"
 
-# 3. 重启 watchdog(setsid 脱离 SSH,断开不杀)
+# 3. 重启 watchdog(setsid 脱离 SSH,断开不杀);有界轮询 pidfile(慢宿主机不误报)
 setsid nohup "$LOOP" "$DIR" >/dev/null 2>&1 &
-sleep 3
-NEWPID=$(cat "$PIDF" 2>/dev/null || true)
+NEWPID=""
+for _ in $(seq 1 15); do
+  NEWPID=$(cat "$PIDF" 2>/dev/null || true)
+  [ -n "$NEWPID" ] && kill -0 "$NEWPID" 2>/dev/null && break
+  sleep 1
+done
 if [ -n "${NEWPID:-}" ] && kill -0 "$NEWPID" 2>/dev/null; then
   log "deploy: OK bin=$BIN watchdog=$NEWPID"
   echo "DEPLOY_OK watchdog=$NEWPID"

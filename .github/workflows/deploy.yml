@@ -30,37 +30,52 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="$(echo "${{ github.event.release.tag_name }}" | grep -v '^$' || true)"
-          if [ -z "$TAG" ] && [ -n "${{ github.event.inputs.release_tag }}" ]; then
+          if [ "${{ github.event_name }}" = "release" ] && [ -n "${{ github.event.release.tag_name }}" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          elif [ -n "${{ github.event.inputs.release_tag }}" ]; then
             TAG="${{ github.event.inputs.release_tag }}"
-          fi
-          if [ -z "$TAG" ]; then
-            TAG="$(gh release list --limit 1 --json tagName --jq '.[0].tagName')"
+          else
+            TAG="$(gh release list --limit 5 --json tagName,isPrerelease --jq 'first(.[] | select(.isPrerelease) | .tagName)')"
           fi
           [ -n "$TAG" ] || { echo "FATAL: no release tag resolvable" >&2; exit 1; }
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "target release: ${TAG}"
 
-      - name: Graceful skip if secrets not configured
+      - name: Graceful skip guard (tag type + secrets)
         id: guard
+        env:
+          REL_TAG: ${{ steps.rel.outputs.tag }}
         run: |
-          if [ -z "${{ secrets.CF_ACCESS_SERVICE_TOKEN_ID }}" ] || \
-             [ -z "${{ secrets.CF_ACCESS_SERVICE_TOKEN_SECRET }}" ] || \
-             [ -z "${{ secrets.BOHRIUM_SSH_KEY }}" ]; then
-            echo "DEPLOY SECRETS NOT CONFIGURED: skipping deploy (release-triggered push stays green)"
+          SKIP=""
+          if [ "${{ github.event_name }}" = "release" ]; then
+            case "$REL_TAG" in
+              Snapshot-*) ;;
+              *) SKIP="release '$REL_TAG' is not a Snapshot-* build" ;;
+            esac
+          fi
+          if [ -z "$SKIP" ]; then
+            if [ -z "${{ secrets.CF_ACCESS_SERVICE_TOKEN_ID }}" ] || \
+               [ -z "${{ secrets.CF_ACCESS_SERVICE_TOKEN_SECRET }}" ] || \
+               [ -z "${{ secrets.BOHRIUM_SSH_KEY }}" ]; then
+              SKIP="deploy secrets not configured"
+            fi
+          fi
+          if [ -n "$SKIP" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "SKIP: ${SKIP} (release-triggered push stays green)"
             if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-              echo "FATAL: workflow_dispatch requires secrets CF_ACCESS_SERVICE_TOKEN_ID + CF_ACCESS_SERVICE_TOKEN_SECRET + BOHRIUM_SSH_KEY" >&2
+              echo "FATAL: ${SKIP} - workflow_dispatch requires secrets CF_ACCESS_SERVICE_TOKEN_ID + CF_ACCESS_SERVICE_TOKEN_SECRET + BOHRIUM_SSH_KEY and a Snapshot-* tag" >&2
               exit 1
             fi
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Install cloudflared
         if: steps.guard.outputs.skip != 'true'
         run: |
-          curl -sL -o /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          CLOUDFLARED_VERSION="2026.6.0"
+          curl -sL -o /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64"
           chmod +x /usr/local/bin/cloudflared
           cloudflared --version
 
