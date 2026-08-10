@@ -169,6 +169,19 @@ jobs:
           done
         shell: bash
 
+      - name: Dispatch tunnel deploy to tebi/pxed
+        # GITHUB_TOKEN 建的 release 不会触发 release 事件(防递归),必须显式 dispatch;
+        # workflow_dispatch 是 GITHUB_TOKEN 可派发新 run 的文档化例外。secrets 缺失时跳过保绿。
+        if: ${{ secrets.CF_ACCESS_SERVICE_TOKEN_ID != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          echo "dispatching deploy.yml for ${VERSION}"
+          gh workflow run deploy.yml --repo "${{ github.repository }}" --ref main -f release_tag="${VERSION}"
+          sleep 5
+          gh run list --repo "${{ github.repository }}" --limit 3 --json databaseId,event,status,displayTitle --jq '.[] | select(.event=="workflow_dispatch" and (.displayTitle|test("Deploy"))) | .databaseId'
+
   build-and-push-docker:
     needs: [prepare, publish-snapshot-release]
     runs-on: ubuntu-latest
