@@ -1,0 +1,95 @@
+name: Deploy Agent (tunnel)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Snapshot release tag to deploy (default: latest)'
+        required: false
+        type: string
+  release:
+    types: [published]
+
+concurrency:
+  group: deploy-agent-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [tebi, pxed]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="$(echo "${{ github.event.release.tag_name }}" | grep -v '^$' || true)"
+          if [ -z "$TAG" ] && [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            TAG="${{ github.event.inputs.release_tag }}"
+          fi
+          if [ -z "$TAG" ]; then
+            TAG="$(gh release list --limit 1 --json tagName --jq '.[0].tagName')"
+          fi
+          [ -n "$TAG" ] || { echo "FATAL: no release tag resolvable" >&2; exit 1; }
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "target release: ${TAG}"
+
+      - name: Graceful skip if secrets not configured
+        id: guard
+        run: |
+          if [ -z "${{ secrets.CF_ACCESS_SERVICE_TOKEN_ID }}" ] || \
+             [ -z "${{ secrets.CF_ACCESS_SERVICE_TOKEN_SECRET }}" ] || \
+             [ -z "${{ secrets.BOHRIUM_SSH_KEY }}" ]; then
+            echo "DEPLOY SECRETS NOT CONFIGURED: skipping deploy (release-triggered push stays green)"
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              echo "FATAL: workflow_dispatch requires secrets CF_ACCESS_SERVICE_TOKEN_ID + CF_ACCESS_SERVICE_TOKEN_SECRET + BOHRIUM_SSH_KEY" >&2
+              exit 1
+            fi
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install cloudflared
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          curl -sL -o /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x /usr/local/bin/cloudflared
+          cloudflared --version
+
+      - name: Download agent binary from release
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/rel
+          gh release download "${{ steps.rel.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern 'komari-agent-linux-amd64' \
+            --dir /tmp/rel
+          ls -l /tmp/rel
+          file /tmp/rel/komari-agent-linux-amd64
+
+      - name: Write SSH key
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          BOHRIUM_SSH_KEY: ${{ secrets.BOHRIUM_SSH_KEY }}
+        run: |
+          printf '%s\n' "$BOHRIUM_SSH_KEY" > /tmp/bohrium_ed25519
+          chmod 600 /tmp/bohrium_ed25519
+
+      - name: Deploy via tunnel
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.CF_ACCESS_SERVICE_TOKEN_ID }}
+          TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.CF_ACCESS_SERVICE_TOKEN_SECRET }}
+          BOHRIUM_SSH_KEY_FILE: /tmp/bohrium_ed25519
+        run: |
+          bash scripts/remote-deploy.sh "${{ matrix.node }}" /tmp/rel/komari-agent-linux-amd64
