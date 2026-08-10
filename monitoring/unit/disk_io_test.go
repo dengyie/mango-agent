@@ -88,6 +88,95 @@ func TestFilterMountTargetsDefaultDedupes(t *testing.T) {
 	}
 }
 
+func TestIsVirtualDevice(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"/dev/sda1", false},
+		{"/dev/vda5", false},
+		{"overlay", true},
+		{"tmpfs", true},
+		{"none", true},
+		{"shm", true},
+	}
+	for _, c := range cases {
+		if got := isVirtualDevice(c.in); got != c.want {
+			t.Errorf("isVirtualDevice(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestFindMountinfoMajorMinor(t *testing.T) {
+	content := `995 939 0:87 / / rw,relatime master:363 - overlay overlay rw,lowerdir=...,upperdir=...
+996 995 0:90 / /proc rw,nosuid - proc proc rw
+1015 995 0:61 / /tmp/mnt rw,relatime - ext4 /dev/vda5 rw,prjquota`
+	if got := findMountinfoMajorMinor(content, "/"); got != "0:87" {
+		t.Errorf("mountpoint / => %q, want 0:87", got)
+	}
+	if got := findMountinfoMajorMinor(content, "/tmp/mnt"); got != "0:61" {
+		t.Errorf("mountpoint /tmp/mnt => %q, want 0:61", got)
+	}
+	if got := findMountinfoMajorMinor(content, "/nonexistent"); got != "" {
+		t.Errorf("mountpoint /nonexistent => %q, want empty", got)
+	}
+}
+
+// 白名单挂载点解析成虚拟设备(overlay 根)且无其它可用目标 → 回退默认物理盘遍历。
+func TestFilterMountTargetsOverlayFallback(t *testing.T) {
+	orig := flags.IncludeMountpoints
+	flags.IncludeMountpoints = "/"
+	defer func() { flags.IncludeMountpoints = orig }()
+
+	parts := []disk.PartitionStat{
+		{Device: "overlay", Mountpoint: "/", Fstype: "overlay"},
+		{Device: "/dev/vda5", Mountpoint: "/tmp/mnt", Fstype: "ext4"},
+	}
+	got := filterMountTargets(parts)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 physical fallback target, got %d", len(got))
+	}
+	if got[0].Device != "vda5" || got[0].Mountpoint != "/tmp/mnt" {
+		t.Errorf("expected vda5@/tmp/mnt (fallback), got %+v", got[0])
+	}
+}
+
+// 白名单里既有虚拟根又有真实数据盘 → 只保留真实目标,不触发回退(避免过度采集)。
+func TestFilterMountTargetsMixedVirtualAndReal(t *testing.T) {
+	orig := flags.IncludeMountpoints
+	flags.IncludeMountpoints = "/;/tmp/mnt"
+	defer func() { flags.IncludeMountpoints = orig }()
+
+	parts := []disk.PartitionStat{
+		{Device: "overlay", Mountpoint: "/", Fstype: "overlay"},
+		{Device: "/dev/vda5", Mountpoint: "/tmp/mnt", Fstype: "ext4"},
+	}
+	got := filterMountTargets(parts)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 target, got %d", len(got))
+	}
+	if got[0].Device != "vda5" || got[0].Mountpoint != "/tmp/mnt" {
+		t.Errorf("expected vda5@/tmp/mnt, got %+v", got[0])
+	}
+}
+
+// 兜底按真实块设备收:overlay 根排除,/tmp/mnt 的真实数据盘收进来,loop 虚拟盘排除。
+func TestFallbackPhysicalTargets(t *testing.T) {
+	parts := []disk.PartitionStat{
+		{Device: "overlay", Mountpoint: "/", Fstype: "overlay"},
+		{Device: "/dev/vda5", Mountpoint: "/tmp/mnt", Fstype: "ext4"},
+		{Device: "/dev/vda5", Mountpoint: "/etc/hosts", Fstype: "ext4"}, // 同设备,保留最短挂载点 /tmp/mnt
+		{Device: "/dev/loop0", Mountpoint: "/mnt/loop", Fstype: "ext4"}, // loop 虚拟盘,排除
+	}
+	got := fallbackPhysicalTargets(parts)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 target, got %d", len(got))
+	}
+	if got[0].Device != "vda5" || got[0].Mountpoint != "/tmp/mnt" {
+		t.Errorf("expected vda5@/tmp/mnt, got %+v", got[0])
+	}
+}
+
 func TestComputeDiskIORates(t *testing.T) {
 	targets := []mountTarget{{Mountpoint: "/tmp/mnt", Device: "vda5"}}
 	prev := map[string]disk.IOCountersStat{
