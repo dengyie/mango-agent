@@ -188,7 +188,10 @@ func icmpPing(target string, timeout time.Duration) (int64, error) {
 	}
 	pinger.Count = 1
 	pinger.Timeout = timeout
-	pinger.SetPrivileged(true)
+	// 非特权 UDP ICMP：agent 常以非 root 运行（Azure/Beszel 型原生进程、Pterodactyl 容器），
+	// raw socket 需要 CAP_NET_RAW 会全丢包；udp4 无特权零配置，且不依赖系统 ping_group_range。
+	// 各节点实测（2026-08-13）：1.1.1.1 / 223.5.5.5 / vps.mangoqwq.com 三目标全通。
+	pinger.SetPrivileged(false)
 	err = pinger.Run()
 	if err != nil {
 		return -1, err
