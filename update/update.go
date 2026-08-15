@@ -19,8 +19,8 @@ import (
 )
 
 var (
-	CurrentVersion string = "Snapshot-260810-diskforce-cache"
-	Repo           string = "komari-monitor/komari-agent"
+	CurrentVersion string = "Snapshot-260816-update-repo"
+	Repo           string = "dengyie/mango-agent"
 )
 
 const (
