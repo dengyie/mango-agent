@@ -190,8 +190,17 @@ func icmpPing(target string, timeout time.Duration) (int64, error) {
 	pinger.Timeout = timeout
 	// 非特权 UDP ICMP：agent 常以非 root 运行（Azure/Beszel 型原生进程、Pterodactyl 容器），
 	// raw socket 需要 CAP_NET_RAW 会全丢包；udp4 无特权零配置，且不依赖系统 ping_group_range。
-	// 各节点实测（2026-08-13）：1.1.1.1 / 223.5.5.5 / vps.mangoqwq.com 三目标全通。
-	pinger.SetPrivileged(false)
+	// 各节点实测（2026-08-13）：1.1.1.1 / 223.5.5.5 / vps.mangoqwq.com 三目标全通（Linux/macOS）。
+	//
+	// Windows 例外：pro-bing 的 unprivileged UDP-based ping 在 Windows 上静默失效
+	//（接收不到 ICMP echo reply → 永远 loss 100%），必须改用 privileged 原始 ICMP socket。
+	// Windows 上 agent 以 schtasks /rl highest（管理员）后台任务运行，有权限走 ip4:icmp。
+	// 2026-08-16 实测：仅 Linux/macOS 用 UDP，Windows 用 privileged。
+	if runtime.GOOS == "windows" {
+		pinger.SetPrivileged(true)
+	} else {
+		pinger.SetPrivileged(false)
+	}
 	err = pinger.Run()
 	if err != nil {
 		return -1, err
