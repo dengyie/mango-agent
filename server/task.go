@@ -196,13 +196,33 @@ func icmpPing(target string, timeout time.Duration) (int64, error) {
 	//（接收不到 ICMP echo reply → 永远 loss 100%），必须改用 privileged 原始 ICMP socket。
 	// Windows 上 agent 以 schtasks /rl highest（管理员）后台任务运行，有权限走 ip4:icmp。
 	// 2026-08-16 实测：仅 Linux/macOS 用 UDP，Windows 用 privileged。
-	if runtime.GOOS == "windows" {
+	windowsPrivilegedICMP := runtime.GOOS == "windows"
+	if windowsPrivilegedICMP {
 		pinger.SetPrivileged(true)
 	} else {
 		pinger.SetPrivileged(false)
 	}
 	err = pinger.Run()
 	if err != nil {
+		// Windows 上 privileged raw ICMP 需要管理员权限（schtasks /rl highest）。
+		// 若任务退化到普通用户运行，ListenPacket("ip4:icmp") 会直接失败——给出明确诊断，
+		// 然后降级试一次非特权 UDP（Windows 非特权通常也收不到回包，但至少区分权限 vs 网络故障）。
+		if windowsPrivilegedICMP {
+			log.Printf("Ping task: privileged ICMP failed on Windows (agent may not be running as admin): %v; retrying unprivileged", err)
+			pinger2, p2err := ping.NewPinger(ip)
+			if p2err != nil {
+				return -1, err
+			}
+			pinger2.Count = 1
+			pinger2.Timeout = timeout
+			pinger2.SetPrivileged(false)
+			if err2 := pinger2.Run(); err2 == nil {
+				stats2 := pinger2.Statistics()
+				if stats2.PacketsRecv > 0 {
+					return stats2.AvgRtt.Milliseconds(), nil
+				}
+			}
+		}
 		return -1, err
 	}
 	stats := pinger.Statistics()

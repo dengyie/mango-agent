@@ -212,10 +212,18 @@ if ($InstallVersion -ne "") {
     $versionToInstall = $InstallVersion
 }
 else {
-    $ApiUrl = "https://api.github.com/repos/dengyie/mango-agent/releases/latest"
+    # 我们的发布全部是 Pre-release（Snapshot-*），releases/latest API 只返回非 pre-release，
+    # 对纯 pre-release 仓库会返回空（404/无 tag）→ 必须用列表 API 取最新的非 draft release。
+    # 与 agent 内建 self-update (update.go snapshotTrack: releases?per_page=100) 逻辑一致。
+    $ApiUrl = "https://api.github.com/repos/dengyie/mango-agent/releases?per_page=100"
     try {
         Log-Step "Fetching latest release version from GitHub API..."
-        $release = Invoke-RestMethod -Uri $ApiUrl -UseBasicParsing
+        $releases = Invoke-RestMethod -Uri $ApiUrl -UseBasicParsing
+        $release = $releases | Where-Object { -not $_.draft } | Select-Object -First 1
+        if (-not $release -or -not $release.tag_name) {
+            Log-Error "No usable release found (all drafts or empty)."
+            exit 1
+        }
         $versionToInstall = $release.tag_name
         Log-Success "Latest version fetched: $versionToInstall"
     }
