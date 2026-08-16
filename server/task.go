@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -182,6 +184,14 @@ func icmpPing(target string, timeout time.Duration) (int64, error) {
 		return -1, err
 	}
 
+	// macOS 例外：pro-bing 非特权 UDP ICMP 在 darwin 上同 Windows 一样静默失效
+	//（收不到 echo reply → 全天 "no packets received"）。macOS 无 Linux 的 ping_group_range，
+	// 普通用户无法开 raw/非特权 ICMP socket，唯一可靠路径是系统 /sbin/ping（setuid root，用户态可用）。
+	// 2026-08-17 实测确诊：agent 全天 no packets received 而原生 ping 0% loss，是 ICMP 通道而非网络问题。
+	if runtime.GOOS == "darwin" {
+		return systemPing(ip, timeout)
+	}
+
 	pinger, err := ping.NewPinger(ip)
 	if err != nil {
 		return -1, err
@@ -230,6 +240,82 @@ func icmpPing(target string, timeout time.Duration) (int64, error) {
 		return -1, errors.New("no packets received")
 	}
 	return stats.AvgRtt.Milliseconds(), nil
+}
+
+// systemPing 用系统 ping（macOS /sbin/ping，setuid root）做 ICMP 检查。
+// pro-bing 在 darwin 上无可靠的非特权 ICMP 路径（见 icmpPing 注释），这里绕过 pro-bing
+// 直接以普通用户身份调用系统 ping，解析其统计输出得到丢包与平均延迟。
+func systemPing(ip string, timeout time.Duration) (int64, error) {
+	// -c 1：单发；-W：单包等待毫秒数（macOS 单位就是 ms）；-n：纯数字、不复查 DNS
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+2*time.Second)
+	defer cancel()
+	timeoutMs := int(timeout.Milliseconds())
+	cmd := exec.CommandContext(ctx, "/sbin/ping", "-n", "-c", "1", "-W", strconv.Itoa(timeoutMs), ip)
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return -1, ctx.Err()
+	}
+	_ = err // macOS 下无回包时 ping 以非 0 exit 退出，判定以统计行为准
+
+	output := string(out)
+	if pingPacketsReceived(output) == 0 {
+		return -1, errors.New("no packets received")
+	}
+	latency, ok := pingAvgRttMs(output)
+	if !ok {
+		// 罕见：有回包但统计行非常规（如 <1ms 显示 time<1），按 0 上报不判失败
+		return 0, nil
+	}
+	return latency, nil
+}
+
+var pingRecvRe = regexp.MustCompile(`(\d+)\s+packets received`)
+
+// pingPacketsReceived 从系统 ping 统计行提取收到回包数。
+// 例："1 packets transmitted, 1 packets received, 0.0% packet loss" / 不可达 "+1 errors"。
+func pingPacketsReceived(output string) int {
+	m := pingRecvRe.FindStringSubmatch(output)
+	if m == nil {
+		return 0
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// pingAvgRttMs 返回平均往返延迟（毫秒）。macOS 统计行示例：
+// "round-trip min/avg/max/stddev = 35.339/35.999/36.369/0.468 ms"
+// 注意 -c 1 时 stddev 为 nan（单样本无标准差），故不能靠纯数字正则，改用字符串定位取 avg 字段。
+func pingAvgRttMs(output string) (int64, bool) {
+	marker := "min/avg/max"
+	i := strings.Index(output, marker)
+	if i < 0 {
+		return 0, false
+	}
+	eq := strings.Index(output[i:], "=")
+	if eq < 0 {
+		return 0, false
+	}
+	rest := strings.TrimSpace(output[i+eq+1:])
+	idx := strings.IndexAny(rest, " \t\r\n")
+	if idx < 0 {
+		return 0, false
+	}
+	parts := strings.Split(strings.TrimSpace(rest[:idx]), "/")
+	if len(parts) < 2 {
+		return 0, false
+	}
+	avg, err := strconv.ParseFloat(parts[1], 64)
+	if err != nil {
+		return 0, false
+	}
+	unit := strings.TrimSpace(rest[idx:])
+	if strings.HasPrefix(unit, "s") {
+		avg *= 1000
+	}
+	return int64(avg), true
 }
 
 func tcpPing(target string, timeout time.Duration) (int64, error) {
