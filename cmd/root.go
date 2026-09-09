@@ -214,6 +214,7 @@ func init() {
 	RootCmd.PersistentFlags().Uint64Var(&flags.ForceMemoryTotal, "force-memory-total", 0, "Override mem_total in bytes when cgroup is unlimited (panel quota)")
 	RootCmd.PersistentFlags().Float64Var(&flags.ForceCPUQuotaCores, "force-cpu-quota-cores", 0, "Override cpu cores (fractional ok) when cgroup is unlimited (panel quota)")
 	RootCmd.PersistentFlags().Uint64Var(&flags.ForceDiskTotal, "force-disk-total", 0, "Override disk total in bytes (panel quota)")
+	RootCmd.PersistentFlags().StringVar(&flags.MinerAPIUrl, "miner-api-url", "", "Miner statistics API URL (SRBMiner /api/v2/status); empty disables mining reporting")
 	RootCmd.PersistentFlags().ParseErrorsWhitelist.UnknownFlags = true
 }
 

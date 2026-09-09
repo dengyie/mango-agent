@@ -37,6 +37,7 @@ type Config struct {
 	ForceMemoryTotal   uint64  `json:"force_memory_total" env:"AGENT_FORCE_MEMORY_TOTAL"`       // 强制内存总量（面板配额，字节）
 	ForceCPUQuotaCores float64 `json:"force_cpu_quota_cores" env:"AGENT_FORCE_CPU_QUOTA_CORES"` // 强制 CPU 配额核数（可为小数）
 	ForceDiskTotal     uint64  `json:"force_disk_total" env:"AGENT_FORCE_DISK_TOTAL"`           // 强制磁盘总量（面板配额，字节）
+	MinerAPIUrl        string  `json:"miner_api_url" env:"AGENT_MINER_API_URL"`                 // 矿工统计 API 地址（SRBMiner /api/v2/status），空=不上报挖矿数据
 }
 
 var GlobalConfig = &Config{}

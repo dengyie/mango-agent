@@ -18,6 +18,7 @@ type report struct {
 	Load        loadReport        `json:"load"`
 	Disk        usageReport       `json:"disk"`
 	DiskIO      []unit.DiskIOStat `json:"disk_io,omitempty"`
+	Mining      *unit.MinerStat   `json:"mining,omitempty"`
 	Network     networkReport     `json:"network"`
 	Connections connectionsReport `json:"connections"`
 	GPU         interface{}       `json:"gpu,omitempty"`
@@ -94,6 +95,9 @@ func GenerateReport() []byte {
 	data.Disk = usageReport{Total: disk.Total, Used: disk.Used}
 
 	data.DiskIO = unit.DiskIO()
+
+	// 矿工状态：配置了 AGENT_MINER_API_URL 才采集（未配置时 Miner 返回 nil，不上报该字段）
+	data.Mining = unit.Miner()
 
 	totalUp, totalDown, networkUp, networkDown, err := unit.NetworkSpeed()
 	if err != nil {
