@@ -74,15 +74,17 @@ const maxMinerStaleSec = 60
 // Miner 采集 SRBMiner 统计 API。AGENT_MINER_API_URL 未配置时直接返回 nil（不上报）。
 // 每次调用允许一次实时 HTTP 拉取（agent 上报间隔通常 ≥3s，矿工 API 是本机回环，开销可忽略）；
 // 拉取失败回退最近成功缓存（≤60s 内），连败计数到阈值后放弃缓存不再兜底。
+// HTTP 在锁外执行（最长 4s 超时），锁只保护缓存状态的读写。
 func Miner() *MinerStat {
 	url := pkg_flags.GlobalConfig.MinerAPIUrl
 	if url == "" {
 		return nil
 	}
-	minerMu.Lock()
-	defer minerMu.Unlock()
 
 	stat, err := fetchMinerStat(url)
+
+	minerMu.Lock()
+	defer minerMu.Unlock()
 	if err != nil {
 		minerFetchFails++
 		if lastMinerStat != nil &&

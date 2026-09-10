@@ -152,3 +152,29 @@ func TestMinerRejectsEmptyAlgorithms(t *testing.T) {
 		t.Fatalf("Miner() with empty algorithms = %#v, want nil", got)
 	}
 }
+
+// 并发调用 Miner()（HTTP 在锁外）必须无竞态：-race 下 10 goroutine 同时打一个
+// 延迟响应的 server，断言结果要么是有效快照要么是缓存/nil，且无数据竞争。
+func TestMinerConcurrentAccessIsRaceFree(t *testing.T) {
+	resetMinerState(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(20 * time.Millisecond) // 放大锁外 HTTP 窗口
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(srbV2Sample))
+	}))
+	defer srv.Close()
+	pkg_flags.GlobalConfig.MinerAPIUrl = srv.URL + "/api/v2/status"
+	defer func() { pkg_flags.GlobalConfig.MinerAPIUrl = "" }()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if stat := Miner(); stat != nil && stat.Hashrate1Min != 62403052604616.36 {
+				t.Errorf("unexpected hashrate %v", stat.Hashrate1Min)
+			}
+		}()
+	}
+	wg.Wait()
+}
