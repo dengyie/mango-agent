@@ -19,7 +19,7 @@ import (
 )
 
 var (
-	CurrentVersion string = "Snapshot-260816-win-fix2"
+	CurrentVersion string = "Snapshot-260911-mining"
 	Repo           string = "dengyie/mango-agent"
 )
 
