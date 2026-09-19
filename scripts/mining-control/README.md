@@ -42,6 +42,9 @@ hub（mango-hub）通过 `agent.mining.control` 下发 `start|stop`，agent 将 
    `[program:komari-probe]`（agent）的 command 不得含 `--disable-web-ssh`，并加
    `environment=AGENT_MINER_CONTROL_CMD="/workspace/srb-control.sh {action}"`。
 4. `/workspace` 与 `/workspace/tools` 为 root 属主：部署用 `sudo tee`；容器重建后需按
-   上表重新落脚本并核对 supervisord.conf（jtzval 的 agent 启动为手工 nohup，重建后需重拉）。
+   上表重新落脚本并核对 supervisord.conf（jtzval 的 agent 启动为手工 nohup，重建后需重拉，
+   **完整启动行必须带上两个 env**，缺 MINER_API_URL 会导致挖矿上报消失：
+   `AGENT_MINER_API_URL=http://127.0.0.1:21551/api/v2/status AGENT_MINER_CONTROL_CMD="/workspace/srb-control.sh {action}" setsid nohup /workspace/komari-agent --endpoint https://vps.mangoqwq.com --token <token> --disable-auto-update --month-rotate 1 --interval 10 --prefer-cgroup-limits >>/workspace/komari-agent.log 2>&1 &`）。
 5. 验收标准：每节点连续两轮 `stop→stop→start→start` 全部 rc=0，且 start 后再次调用
-   能正常拿锁（证明无 fd 泄漏）。
+   能正常拿锁（证明无 fd 泄漏）；**重拉 agent 后用 `common:getNodesLatestStatus` 确认
+   mining 字段恢复**（本次 §8.3.2 热修时曾因丢 MINER_API_URL 静默且回报）。
