@@ -3,15 +3,17 @@ package monitoring
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 	"time"
-
-	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 )
 
 // MinerStat 一次矿工状态快照（SRBMiner-MULTI /api/v2/status 归一化，跨版本兼容）。
 // 只取第一个算法的聚合视图；hashrate 单位 H/s，power W，温度 °C。
+//
+// 注意：没有 SharesStale 字段。SRBMiner /api/v2/status 不暴露独立 stale 计数，
+// 硬编码 0 会向 hub 和面板上报一个「看似健康」的假份额，故不产出该字段（缺失=未知）。
 type MinerStat struct {
 	Algorithm     string  `json:"algorithm"`
 	Pool          string  `json:"pool"`
@@ -23,7 +25,6 @@ type MinerStat struct {
 	FanPercent    float64 `json:"fan_percent"`
 	SharesTotal   int64   `json:"shares_total"`
 	SharesValid   int64   `json:"shares_valid"`
-	SharesStale   int64   `json:"shares_stale"`
 	SharesInvalid int64   `json:"shares_invalid"`
 	HwErrors      int64   `json:"hw_errors"`
 	PoolLatency   int64   `json:"pool_latency"`
@@ -59,45 +60,85 @@ type srbStatus struct {
 	} `json:"algorithms"`
 }
 
+// ---------------------------------------------------------------------------
+// 后台采集者架构
+//
+// 早期实现里 Miner() 在每次上报（GenerateReport 热路径）同步发起 HTTP GET。
+// 单个 4s 超时的请求会把整条上报链路拖住——默认上报间隔 3s < 单次超时 4s，矿工
+// API 一旦慢/挂，网络/CPU/内存等全部核心指标都要陪着等满超时。
+//
+// 根因修复：把矿工采集移到一个独立后台 goroutine（StartMinerCollector），按
+// minerCollectionInterval 轮询并写入共享快照；Miner() 只做非阻塞读缓存。上报热
+// 路径从此不再有任何网络 IO，矿工 API 的慢/挂只影响矿工字段本身。
+// ---------------------------------------------------------------------------
+
+const (
+	// minerRequestTimeout 单次矿工 API 请求超时。只发生在后台采集 goroutine，不影响上报热路径。
+	minerRequestTimeout = 4 * time.Second
+	// minerCollectionInterval 后台采集轮询间隔。份额通常每 15-30 分钟才变化，5s 足够新鲜。
+	minerCollectionInterval = 5 * time.Second
+	// minerStaleAfter 快照年龄上限：超过该时长仍未成功采集则视为过期。
+	minerStaleAfter = 60 * time.Second
+	// minerMaxFails 连续失败超过该次后，放弃回报过期快照（等同旧实现的连败阈值）。
+	minerMaxFails = 5
+)
+
 var (
-	minerHTTPClient = &http.Client{Timeout: 4 * time.Second}
+	minerHTTPClient = &http.Client{Timeout: minerRequestTimeout}
 	minerMu         sync.Mutex
 	lastMinerStat   *MinerStat
 	lastMinerFetch  time.Time
 	minerFetchFails int
 )
 
-// maxMinerStaleSec 缓存最长保鲜：即使矿工 API 刚好超时，也回退到最近一次成功快照，
-// 避免上报抖动导致曲线断点。超过该时限则返回 nil（本次不报 mining）。
-const maxMinerStaleSec = 60
-
-// Miner 采集 SRBMiner 统计 API。AGENT_MINER_API_URL 未配置时直接返回 nil（不上报）。
-// 每次调用允许一次实时 HTTP 拉取（agent 上报间隔通常 ≥3s，矿工 API 是本机回环，开销可忽略）；
-// 拉取失败回退最近成功缓存（≤60s 内），连败计数到阈值后放弃缓存不再兜底。
-// HTTP 在锁外执行（最长 4s 超时），锁只保护缓存状态的读写。
-func Miner() *MinerStat {
-	url := pkg_flags.GlobalConfig.MinerAPIUrl
+// StartMinerCollector 在后台轮询 SRBMiner API 并维护最新快照。url 为空时不启动（无上报）。
+// 应在 agent 初始化阶段调用一次；goroutine 随进程常驻，进程退出即回收（无需显式 stop）。
+func StartMinerCollector(url string) {
 	if url == "" {
-		return nil
+		return
 	}
+	go func() {
+		log.Printf("[miner] collector started, polling %s every %s", url, minerCollectionInterval)
+		collectMinerOnce(url) // 立即拉一次，避免首个周期在上报前无数据
+		ticker := time.NewTicker(minerCollectionInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			collectMinerOnce(url)
+		}
+	}()
+}
 
+// collectMinerOnce 拉取一次最新状态并写入共享缓存。失败仅更新失败计数并打日志（限流），
+// 保留最近一次成功快照；是否返回由 Miner() 按 minerStaleAfter / minerMaxFails 判定。
+func collectMinerOnce(url string) {
 	stat, err := fetchMinerStat(url)
-
 	minerMu.Lock()
 	defer minerMu.Unlock()
 	if err != nil {
 		minerFetchFails++
-		if lastMinerStat != nil &&
-			time.Since(lastMinerFetch) <= maxMinerStaleSec*time.Second &&
-			minerFetchFails <= 5 {
-			return lastMinerStat
+		// 每次失败都打日志太吵，只在阈值附近打（首批 + 达到阈值那次）。
+		if minerFetchFails <= minerMaxFails || minerFetchFails == minerMaxFails+1 {
+			log.Printf("[miner] fetch failed (%d consecutive): %v", minerFetchFails, err)
 		}
-		return nil
+		return
 	}
 	minerFetchFails = 0
 	lastMinerStat = stat
 	lastMinerFetch = time.Now()
-	return stat
+}
+
+// Miner returns 最近一次成功采集的矿工快照（只读缓存读，无任何网络 IO，非阻塞）。
+// 未采集过、或快照已过期（>minerStaleAfter 或连败>minerMaxFails）时返回 nil。
+func Miner() *MinerStat {
+	minerMu.Lock()
+	defer minerMu.Unlock()
+	if lastMinerStat == nil {
+		return nil
+	}
+	if time.Since(lastMinerFetch) > minerStaleAfter || minerFetchFails > minerMaxFails {
+		return nil
+	}
+	return lastMinerStat
 }
 
 func fetchMinerStat(rawURL string) (*MinerStat, error) {
@@ -118,6 +159,8 @@ func fetchMinerStat(rawURL string) (*MinerStat, error) {
 
 // normalizeSrbStatus 把 SRBMiner v2 状态归一化为 MinerStat。
 // hashrate 窗口 "1min"/"1hr" 官方 3.6.3 为裸数值（旧版可能为对象），两种形态都兼容。
+// 本产品面向单算法矿机（如 XEL）：只归一化 Algorithms[0]，多算法矿机会静默只报第一个；
+// 若日后需要再扩展为按算法分桶上报。
 func normalizeSrbStatus(s *srbStatus) (*MinerStat, error) {
 	if len(s.Algorithms) == 0 {
 		return nil, fmt.Errorf("miner api returned no algorithms")
@@ -154,7 +197,6 @@ func normalizeSrbStatus(s *srbStatus) (*MinerStat, error) {
 		FanPercent:    fan,
 		SharesTotal:   alg.Shares.Total,
 		SharesValid:   alg.Shares.Accepted,
-		SharesStale:   0, // SRBMiner API v2 无独立 stale 计数（=0 占位，Kryptex 面板侧另有统计）
 		SharesInvalid: alg.Shares.Rejected,
 		HwErrors:      hwErr,
 		PoolLatency:   alg.Pool.Latency,
