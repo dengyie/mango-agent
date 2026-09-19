@@ -38,6 +38,9 @@ type Config struct {
 	ForceCPUQuotaCores float64 `json:"force_cpu_quota_cores" env:"AGENT_FORCE_CPU_QUOTA_CORES"` // 强制 CPU 配额核数（可为小数）
 	ForceDiskTotal     uint64  `json:"force_disk_total" env:"AGENT_FORCE_DISK_TOTAL"`           // 强制磁盘总量（面板配额，字节）
 	MinerAPIUrl        string  `json:"miner_api_url" env:"AGENT_MINER_API_URL"`                 // 矿工统计 API 地址（SRBMiner /api/v2/status），空=不上报挖矿数据
+	// MinerControlCmd: 中心端管控本机挖矿的命令模板，必须含 {action} 占位符（hub 下发时替换为 start/stop）。
+	// Windows 经 PowerShell 执行、其它平台经 sh 执行；空=本机不接受挖矿管控。示例见文档 §mining-control。
+	MinerControlCmd string `json:"miner_control_cmd" env:"AGENT_MINER_CONTROL_CMD"`
 }
 
 var GlobalConfig = &Config{}

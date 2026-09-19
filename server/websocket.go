@@ -431,6 +431,17 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 		} else {
 			log.Printf("bad v2 exec params: %v", err)
 		}
+	case v2.MethodAgentMiningControl:
+		var p struct {
+			TaskID string `json:"task_id"`
+			Action string `json:"action"`
+		}
+		if err := v2.BindParams(params, &p); err == nil {
+			go NewMiningControlTask(p.TaskID, p.Action)
+			return true
+		} else {
+			log.Printf("bad v2 mining control params: %v", err)
+		}
 	case v2.MethodAgentPing:
 		var p struct {
 			TaskID uint   `json:"ping_task_id"`

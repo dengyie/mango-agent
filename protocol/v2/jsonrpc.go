@@ -8,17 +8,18 @@ import (
 )
 
 const (
-	Version               = "2.0"
-	MethodAgentReport     = "agent.report"
-	MethodAgentBasicInfo  = "agent.basicInfo"
-	MethodAgentPingResult = "agent.pingResult"
-	MethodAgentTaskResult = "agent.taskResult"
-	MethodAgentExec       = "agent.exec"
-	MethodAgentPing       = "agent.ping"
-	MethodAgentMessage    = "agent.message"
-	MethodAgentEvent      = "agent.event"
-	MethodAgentTerminal   = "agent.terminal.request"
-	MethodAgentPull       = "agent.pull"
+	Version                  = "2.0"
+	MethodAgentReport        = "agent.report"
+	MethodAgentBasicInfo     = "agent.basicInfo"
+	MethodAgentPingResult    = "agent.pingResult"
+	MethodAgentTaskResult    = "agent.taskResult"
+	MethodAgentExec          = "agent.exec"
+	MethodAgentMiningControl = "agent.mining.control"
+	MethodAgentPing          = "agent.ping"
+	MethodAgentMessage       = "agent.message"
+	MethodAgentEvent         = "agent.event"
+	MethodAgentTerminal      = "agent.terminal.request"
+	MethodAgentPull          = "agent.pull"
 )
 
 type Request struct {
