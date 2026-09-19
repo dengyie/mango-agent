@@ -35,10 +35,14 @@ func Cpu() CpuInfo {
 				cpuinfo.CPUCores = cores
 				cpuinfo.CPUPhysicalCores = cores
 			}
-			if cg.UsagePercent > 0 {
-				cpuinfo.CPUUsage = cg.UsagePercent
-				return cpuinfo
+			usage := cg.UsagePercent
+			if usage > 100.0 {
+				usage = 100.0
+			} else if usage < 0.0 {
+				usage = 0.0
 			}
+			cpuinfo.CPUUsage = usage
+			return cpuinfo
 		}
 		if flags.ForceCPUQuotaCores > 0 {
 			coresF := flags.ForceCPUQuotaCores
@@ -56,6 +60,11 @@ func Cpu() CpuInfo {
 			percentages, err := cpu.Percent(200*time.Millisecond, false)
 			if err == nil && len(percentages) > 0 {
 				scaled := percentages[0] * float64(hostN) / coresF
+				if scaled > 100.0 {
+					scaled = 100.0
+				} else if scaled < 0.0 {
+					scaled = 0.0
+				}
 				cpuinfo.CPUUsage = scaled
 			}
 			return cpuinfo
@@ -64,7 +73,13 @@ func Cpu() CpuInfo {
 
 	percentages, err := cpu.Percent(0, false)
 	if err == nil && len(percentages) > 0 {
-		cpuinfo.CPUUsage = percentages[0]
+		usage := percentages[0]
+		if usage > 100.0 {
+			usage = 100.0
+		} else if usage < 0.0 {
+			usage = 0.0
+		}
+		cpuinfo.CPUUsage = usage
 	}
 
 	return cpuinfo

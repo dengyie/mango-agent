@@ -111,7 +111,6 @@ func selfCgroupV1Path(controller string) string {
 func ReadCgroupMemory() CgroupMem {
 	out := CgroupMem{}
 	if dir := resolveCgroupV2Dir(); dir != "" {
-		_, limB, err1 := readFirstExisting(filepath.Join(dir, "memory.max"))
 		_, useB, err2 := readFirstExisting(filepath.Join(dir, "memory.current"))
 		if err2 == nil {
 			if use, err := parseUintBytes(useB); err == nil {
@@ -119,15 +118,36 @@ func ReadCgroupMemory() CgroupMem {
 				out.Path = dir
 			}
 		}
-		if err1 == nil {
-			limS := strings.TrimSpace(string(limB))
-			if limS != "max" {
-				if lim, err := parseUintBytes(limB); err == nil && lim > 0 && lim < cgroupUnlimited {
-					out.Limit = lim
-					out.OK = true
-					return out
+		// Walk up from dir towards /sys/fs/cgroup to find the first finite memory.max
+		curr := dir
+		for {
+			limB, err1 := os.ReadFile(filepath.Join(curr, "memory.max"))
+			if err1 == nil {
+				limS := strings.TrimSpace(string(limB))
+				if limS != "max" {
+					if lim, err := parseUintBytes(limB); err == nil && lim > 0 && lim < cgroupUnlimited {
+						out.Limit = lim
+						out.OK = true
+						return out
+					}
 				}
 			}
+			if out.Usage == 0 {
+				if ub, err := os.ReadFile(filepath.Join(curr, "memory.current")); err == nil {
+					if use, err := parseUintBytes(ub); err == nil {
+						out.Usage = use
+						out.Path = curr
+					}
+				}
+			}
+			if curr == "/sys/fs/cgroup" || curr == "/" || curr == "." {
+				break
+			}
+			parent := filepath.Dir(curr)
+			if parent == curr {
+				break
+			}
+			curr = parent
 		}
 		return out // may have Usage only
 	}
@@ -158,28 +178,34 @@ func ReadCgroupMemory() CgroupMem {
 
 func readCPUQuota(dir string, v2 bool) (quotaUS, periodUS int64, ok bool) {
 	if v2 {
-		b, err := os.ReadFile(filepath.Join(dir, "cpu.max"))
-		if err != nil {
-			return 0, 0, false
-		}
-		fields := strings.Fields(string(b))
-		if len(fields) < 1 {
-			return 0, 0, false
-		}
-		if fields[0] == "max" {
-			return 0, 0, false
-		}
-		q, err := strconv.ParseInt(fields[0], 10, 64)
-		if err != nil || q <= 0 {
-			return 0, 0, false
-		}
-		p := int64(100000)
-		if len(fields) >= 2 {
-			if pp, err := strconv.ParseInt(fields[1], 10, 64); err == nil && pp > 0 {
-				p = pp
+		curr := dir
+		for {
+			b, err := os.ReadFile(filepath.Join(curr, "cpu.max"))
+			if err == nil {
+				fields := strings.Fields(string(b))
+				if len(fields) >= 1 && fields[0] != "max" {
+					q, err := strconv.ParseInt(fields[0], 10, 64)
+					if err == nil && q > 0 {
+						p := int64(100000)
+						if len(fields) >= 2 {
+							if pp, err := strconv.ParseInt(fields[1], 10, 64); err == nil && pp > 0 {
+								p = pp
+							}
+						}
+						return q, p, true
+					}
+				}
 			}
+			if curr == "/sys/fs/cgroup" || curr == "/" || curr == "." {
+				break
+			}
+			parent := filepath.Dir(curr)
+			if parent == curr {
+				break
+			}
+			curr = parent
 		}
-		return q, p, true
+		return 0, 0, false
 	}
 	// v1
 	qb, err1 := os.ReadFile(filepath.Join(dir, "cpu.cfs_quota_us"))
@@ -200,17 +226,29 @@ func readCPUQuota(dir string, v2 bool) (quotaUS, periodUS int64, ok bool) {
 
 func readCPUUsageUsec(dir string, v2 bool) (uint64, bool) {
 	if v2 {
-		b, err := os.ReadFile(filepath.Join(dir, "cpu.stat"))
-		if err != nil {
-			return 0, false
-		}
-		sc := bufio.NewScanner(strings.NewReader(string(b)))
-		for sc.Scan() {
-			f := strings.Fields(sc.Text())
-			if len(f) == 2 && f[0] == "usage_usec" {
-				v, err := strconv.ParseUint(f[1], 10, 64)
-				return v, err == nil
+		curr := dir
+		for {
+			b, err := os.ReadFile(filepath.Join(curr, "cpu.stat"))
+			if err == nil {
+				sc := bufio.NewScanner(strings.NewReader(string(b)))
+				for sc.Scan() {
+					f := strings.Fields(sc.Text())
+					if len(f) == 2 && f[0] == "usage_usec" {
+						v, err := strconv.ParseUint(f[1], 10, 64)
+						if err == nil {
+							return v, true
+						}
+					}
+				}
 			}
+			if curr == "/sys/fs/cgroup" || curr == "/" || curr == "." {
+				break
+			}
+			parent := filepath.Dir(curr)
+			if parent == curr {
+				break
+			}
+			curr = parent
 		}
 		return 0, false
 	}
@@ -288,7 +326,13 @@ func ReadCgroupCPU(sampleWindow time.Duration) CgroupCPU {
 	if elapsed <= 0 || cores <= 0 {
 		return out
 	}
-	deltaSec := float64(u2-u1) / 1e6
-	out.UsagePercent = (deltaSec / (elapsed * cores)) * 100
-	return out
+		deltaSec := float64(u2-u1) / 1e6
+		usage := (deltaSec / (elapsed * cores)) * 100
+		if usage > 100.0 {
+			usage = 100.0
+		} else if usage < 0.0 {
+			usage = 0.0
+		}
+		out.UsagePercent = usage
+		return out
 }
