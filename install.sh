@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # Color definitions for terminal output
 RED='\033[0;31m'
@@ -35,15 +35,18 @@ log_config() {
     echo -e "${CYAN}[CONFIG]${NC} $1"
 }
 
+# $EUID 是 bash 专有变量, ash/dash 下未定义, 补 POSIX 回退
+EUID=${EUID:-$(id -u)}
+
 # Default values
 service_name="komari-agent"
 target_dir="/opt/komari"
 github_proxy=""
 install_version="" # New parameter for specifying version
 install_dir_specified=false
+install_no_mirror=false # 关闭自动加速镜像
 service_user="${SUDO_USER:-$(id -un)}"
 user_service=false
- 
 
 # Detect OS
 os_type=$(uname -s)
@@ -75,7 +78,8 @@ esac
 
 # Parse install-specific arguments
 komari_args=""
-while [[ $# -gt 0 ]]; do
+# [[ ]] -> [ ] (POSIX)
+while [ $# -gt 0 ]; do
     case $1 in
         --install-dir)
             target_dir="$2"
@@ -93,6 +97,10 @@ while [[ $# -gt 0 ]]; do
         --install-version)
             install_version="$2"
             shift 2
+            ;;
+        --install-no-mirror) # 新增: 关闭自动加速镜像
+            install_no_mirror=true
+            shift
             ;;
         --install*)
             log_warning "Unknown install parameter: $1"
@@ -139,7 +147,7 @@ log_config "Installation configuration:"
 log_config "  Service name: ${GREEN}$service_name${NC}"
 log_config "  Service user: ${GREEN}$service_user${NC}"
 log_config "  Install directory: ${GREEN}$target_dir${NC}"
-log_config "  GitHub proxy: ${GREEN}${github_proxy:-"(direct)"}${NC}"
+log_config "  GitHub proxy: ${GREEN}${github_proxy:-(direct)}${NC}"
 log_config "  Binary arguments: ${GREEN}$komari_args${NC}"
 if [ -n "$install_version" ]; then
     log_config "  Specified agent version: ${GREEN}$install_version${NC}"
@@ -237,11 +245,15 @@ install_dependencies() {
         elif command -v apk >/dev/null 2>&1; then
             log_info "Using apk to install dependencies..."
             apk add $missing_deps
+        elif command -v opkg >/dev/null 2>&1; then # OpenWrt / iStoreOS
+            log_info "Using opkg to install dependencies (OpenWrt/iStoreOS)..."
+            opkg update
+            opkg install $missing_deps
         elif command -v brew >/dev/null 2>&1; then
             log_info "Using Homebrew to install dependencies..."
             brew install $missing_deps
         else
-            log_error "No supported package manager found (apt/yum/apk/brew)"
+            log_error "No supported package manager found (apt/yum/apk/opkg/brew)"
             exit 1
         fi
         
@@ -307,16 +319,62 @@ case $arch in
 esac
 log_info "Detected OS: ${GREEN}$os_name${NC}, Architecture: ${GREEN}$arch${NC}"
 
+file_name="komari-agent-${os_name}-${arch}"
+
+resolve_snapshot_version() {
+    snapshot_api_url="https://api.github.com/repos/komari-monitor/komari-agent/releases?per_page=100"
+    if [ -n "$github_proxy" ]; then
+        snapshot_api_urls="${github_proxy}/${snapshot_api_url} ${snapshot_api_url}"
+    else
+        snapshot_api_urls="$snapshot_api_url"
+    fi
+
+    for api_url in $snapshot_api_urls; do
+        if ! releases_json=$(curl -fsSL --connect-timeout 15 \
+            -H "Accept: application/vnd.github+json" \
+            -H "User-Agent: komari-agent-installer" \
+            "$api_url"); then
+            releases_json=""
+        fi
+
+        if [ -n "$releases_json" ]; then
+            RESOLVED_SNAPSHOT_VERSION=$(printf '%s\n' "$releases_json" |
+                grep -o '"tag_name":[[:space:]]*"Snapshot-[^"]*"' |
+                sed 's/.*"\(Snapshot-[^"]*\)".*/\1/' |
+                LC_ALL=C sort -r |
+                head -n 1)
+            if [ -n "$RESOLVED_SNAPSHOT_VERSION" ]; then
+                return 0
+            fi
+        fi
+
+        if [ "$api_url" != "$snapshot_api_url" ]; then
+            log_warning "Failed to resolve snapshot releases through GitHub proxy, retrying directly."
+        fi
+    done
+
+    return 1
+}
+
 version_to_install="latest"
 if [ -n "$install_version" ]; then
-    log_info "Attempting to install specified version: ${GREEN}$install_version${NC}"
-    version_to_install="$install_version"
+    if [ "$install_version" = "snapshot" ]; then
+        log_info "Resolving the latest snapshot version..."
+        if ! resolve_snapshot_version; then
+            log_error "Failed to resolve the latest snapshot version."
+            exit 1
+        fi
+        version_to_install="$RESOLVED_SNAPSHOT_VERSION"
+        log_success "Latest snapshot version: ${GREEN}$version_to_install${NC}"
+    else
+        log_info "Attempting to install specified version: ${GREEN}$install_version${NC}"
+        version_to_install="$install_version"
+    fi
 else
     log_info "No version specified, installing the latest version."
 fi
 
 # Construct download URL
-file_name="komari-agent-${os_name}-${arch}"
 if [ "$version_to_install" = "latest" ]; then
     download_path="latest/download"
 else
@@ -337,16 +395,33 @@ if [ "$EUID" -eq 0 ] && [ "$service_user" != "root" ]; then
     chown "$service_user" "$target_dir"
 fi
 
-# Download binary
-if [ -n "$github_proxy" ]; then
-    log_step "Downloading $file_name via proxy..."
-    log_info "URL: ${CYAN}$download_url${NC}"
+# Download with automatic mirror fallback.
+# 直连失败自动依次尝试常见 GitHub 加速镜像, 可用 --install-no-mirror 关闭.
+if [ -n "$github_proxy" ] || [ "$install_no_mirror" = "true" ]; then
+    download_urls="$download_url"
 else
-    log_step "Downloading $file_name directly..."
-    log_info "URL: ${CYAN}$download_url${NC}"
+    download_urls="
+${download_url}
+https://ghfast.top/${download_url}
+https://gh-proxy.com/${download_url}
+https://ghproxy.net/${download_url}
+"
 fi
-if ! curl -L -o "$komari_agent_path" "$download_url"; then
-    log_error "Download failed"
+
+dl_ok=""
+for u in $download_urls; do
+    log_step "Downloading $file_name ..."
+    log_info "URL: ${CYAN}$u${NC}"
+    if curl -fL --connect-timeout 15 -o "$komari_agent_path" "$u" && [ -s "$komari_agent_path" ]; then
+        dl_ok=1
+        break
+    fi
+    rm -f "$komari_agent_path"
+done
+
+if [ -z "$dl_ok" ]; then
+    log_error "Download failed from all sources (direct + mirrors)"
+    log_error "Retry later, or specify --install-ghproxy <mirror-prefix> manually"
     exit 1
 fi
 
@@ -567,7 +642,10 @@ ARGS="${komari_args}"
 
 start_service() {
     procd_open_instance
-    procd_set_param command \$PROG \$ARGS
+    # 参数逐个追加, 避免整串拼接可能导致的引号/转义问题
+    procd_set_param command "\$PROG"
+    # shellcheck disable=SC2086
+    procd_append_param command \$ARGS
     procd_set_param respawn
     procd_set_param stdout 1
     procd_set_param stderr 1
@@ -575,9 +653,9 @@ start_service() {
     procd_close_instance
 }
 
-stop_service() {
-    killall \$(basename \$PROG)
-}
+# 移除 killall 版 stop_service:
+# USE_PROCD=1 时 rc.common 默认 stop 会通过 procd 正确终止实例,
+# 按进程名 killall 反而可能误杀同名进程, 且无法阻止 respawn.
 
 reload_service() {
     stop
@@ -594,8 +672,14 @@ elif [ "$init_system" = "launchd" ]; then
     # macOS launchd service configuration
     log_info "Using launchd for service management"
     
-    # Determine if this should be a system or user service based on installation directory
-    if [[ "$target_dir" =~ ^/Users/.* ]] || [ "$EUID" -ne 0 ]; then
+    # [[ =~ ]] -> case (POSIX); 判定用户级还是系统级安装
+    is_user_install=false
+    case "$target_dir" in
+        /Users/*) is_user_install=true ;;
+    esac
+    [ "$EUID" -ne 0 ] && is_user_install=true
+    
+    if [ "$is_user_install" = true ]; then
         # User-level service (LaunchAgent)
         plist_dir="$HOME/Library/LaunchAgents"
         plist_file="$plist_dir/com.komari.${service_name}.plist"
@@ -648,7 +732,7 @@ EOF
 EOF
     
     # Load and start the service
-    if [[ "$target_dir" =~ ^/Users/.* ]] || [ "$EUID" -ne 0 ]; then
+    if [ "$is_user_install" = true ]; then
         # User-level service
         if launchctl bootstrap gui/$(id -u) "$plist_file"; then
             log_success "User-level launchd service configured and started"
@@ -716,3 +800,5 @@ fi
 log_config "Service: ${GREEN}$service_name${NC}"
 log_config "Arguments: ${GREEN}$komari_args${NC}"
 echo -e "${WHITE}===========================================${NC}"
+
+

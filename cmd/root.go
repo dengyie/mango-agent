@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -27,11 +28,18 @@ import (
 
 var flags = pkg_flags.GlobalConfig
 
+var warningPanelHost, warningRunAsUser string
+
 var RootCmd = &cobra.Command{
 	Use:   "komari-agent",
 	Short: "komari agent",
 	Long:  `komari agent`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Notification helpers must not load the service's config or credentials.
+		if flags.ShowWarning {
+			ShowToast()
+			return nil
+		}
 		loadFromEnv() // 从环境变量加载配置，覆盖解析
 		if flags.ConfigFile != "" {
 			bytes, err := os.ReadFile(flags.ConfigFile)
@@ -43,30 +51,21 @@ var RootCmd = &cobra.Command{
 				return fmt.Errorf("failed to parse config file: %w", err)
 			}
 		}
-		if flags.ProtocolVersion == 0 {
-			flags.ProtocolVersion = 2
-		}
 		if flags.PreferIPVersion != "" && flags.PreferIPVersion != "4" && flags.PreferIPVersion != "6" {
 			return fmt.Errorf("invalid --prefer-ip-version value %q: expected 4 or 6", flags.PreferIPVersion)
 		}
 		// 捕获中止信号，优雅退出
 		stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+
+		stopWarning := startSecurityWarning(stopCtx)
+		defer stopWarning()
+		shutdown := newShutdownCoordinator(stopWarning, netstatic.Stop, os.Exit)
 		go func() {
 			<-stopCtx.Done()
 			log.Printf("shutting down gracefully...")
-			netstatic.Stop()
-			os.Exit(0)
+			shutdown.shutdown(0)
 		}()
-
-		if flags.ShowWarning {
-			ShowToast()
-			os.Exit(0)
-		}
-
-		if !flags.DisableWebSsh {
-			go WarnKomariRunning()
-		}
 
 		if flags.MonthRotate != 0 {
 			err := netstatic.StartOrContinue()
@@ -146,10 +145,12 @@ var RootCmd = &cobra.Command{
 		// 自动更新
 		if !flags.DisableAutoUpdate {
 			err := update.CheckAndUpdate()
-			if err != nil {
-				log.Println("[ERROR]", err)
+			if handleUpdateCheckResult(err, shutdown) {
+				return nil
 			}
-			go update.DoUpdateWorks()
+			go update.DoUpdateWorks(func() {
+				shutdown.shutdown(42)
+			})
 		}
 		go server.DoUploadBasicInfoWorks()
 		// 后台采集矿工状态（AGENT_MINER_API_URL 未配置时不启动）。独立 goroutine，
@@ -160,6 +161,17 @@ var RootCmd = &cobra.Command{
 			server.EstablishWebSocketConnection()
 		}
 	},
+}
+
+func handleUpdateCheckResult(err error, shutdown *shutdownCoordinator) bool {
+	if errors.Is(err, update.ErrRestartRequired) {
+		shutdown.shutdown(42)
+		return true
+	}
+	if err != nil {
+		log.Println("[ERROR]", err)
+	}
+	return false
 }
 
 func Execute() {
@@ -206,11 +218,14 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&flags.CustomDNS, "custom-dns", "", "Custom DNS server to use (e.g. 8.8.8.8, 114.114.114.114). By default, the program uses the system DNS resolver.")
 	RootCmd.PersistentFlags().BoolVar(&flags.EnableGPU, "gpu", false, "Enable detailed GPU monitoring (usage, memory, multi-GPU support)")
 	RootCmd.PersistentFlags().BoolVar(&flags.ShowWarning, "show-warning", false, "Show security warning on Windows, run once as a subprocess")
+	RootCmd.PersistentFlags().StringVar(&warningPanelHost, "warning-panel-host", "", "Panel host shown by the notification helper")
+	RootCmd.PersistentFlags().StringVar(&warningRunAsUser, "warning-run-as-user", "", "Agent account shown by the notification helper")
+	_ = RootCmd.PersistentFlags().MarkHidden("warning-panel-host")
+	_ = RootCmd.PersistentFlags().MarkHidden("warning-run-as-user")
 	RootCmd.PersistentFlags().StringVar(&flags.CustomIpv4, "custom-ipv4", "", "Custom IPv4 address to use")
 	RootCmd.PersistentFlags().StringVar(&flags.CustomIpv6, "custom-ipv6", "", "Custom IPv6 address to use")
 	RootCmd.PersistentFlags().BoolVar(&flags.GetIpAddrFromNic, "get-ip-addr-from-nic", false, "Get IP address from network interface")
 	RootCmd.PersistentFlags().StringVar(&flags.ConfigFile, "config", "", "Path to the configuration file")
-	RootCmd.PersistentFlags().IntVar(&flags.ProtocolVersion, "protocol-version", 2, "Report protocol version (1 or 2)")
 	RootCmd.PersistentFlags().BoolVar(&flags.DisableCompression, "disable-compression", false, "Disable v2 gzip/permessage-deflate compression")
 	RootCmd.PersistentFlags().StringVar(&flags.PreferIPVersion, "prefer-ip-version", "", "Prefer IP version for dashboard connections: 4 or 6")
 	RootCmd.PersistentFlags().BoolVar(&flags.PreferCgroupLimits, "prefer-cgroup-limits", false, "Prefer Linux cgroup memory/CPU quotas (container/Pterodactyl) over host /proc")
