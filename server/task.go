@@ -124,9 +124,19 @@ func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time)
 			FinishedAt: finishedAt,
 		},
 	}
-	if err := postV2RPC(payload); err != nil {
-		log.Printf("Failed to upload task result: %v", err)
+	const maxRetries = 3
+	var err error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		err = postV2RPC(payload)
+		if err == nil {
+			return
+		}
+		log.Printf("Failed to upload task result for task %s (attempt %d/%d): %v", taskID, attempt, maxRetries, err)
+		if attempt < maxRetries {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
 	}
+	log.Printf("Permanently failed to upload task result for task %s after %d attempts: %v", taskID, maxRetries, err)
 }
 
 // resolveIP 解析域名到 IP 地址，排除 DNS 查询时间

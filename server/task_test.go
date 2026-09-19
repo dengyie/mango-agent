@@ -1,6 +1,9 @@
 package server
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -59,5 +62,34 @@ func TestHTTPPing(t *testing.T) {
 				t.Errorf("HTTP ping %s error: %v", tt.target, err)
 			}
 		})
+	}
+}
+
+func TestUploadTaskResultRetriesOnTransientFailure(t *testing.T) {
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		att := atomic.AddInt32(&attempts, 1)
+		if att < 2 {
+			http.Error(w, "temporary error", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":{"status":"success"}}`))
+	}))
+	defer server.Close()
+
+	oldEndpoint := flags.Endpoint
+	oldToken := flags.Token
+	flags.Endpoint = server.URL
+	flags.Token = "test-token"
+	defer func() {
+		flags.Endpoint = oldEndpoint
+		flags.Token = oldToken
+	}()
+
+	uploadTaskResult("task-123", "success", 0, time.Now())
+
+	if got := atomic.LoadInt32(&attempts); got != 2 {
+		t.Fatalf("expected 2 attempts due to retry, got %d", got)
 	}
 }
