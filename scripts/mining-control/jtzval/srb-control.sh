@@ -27,6 +27,9 @@ case "$1" in
     fi
     # 2026-09-19 热修：spawn 必须关闭锁 fd(9>&-)，否则矿机继承 flock，
     # 脚本退出后孤儿矿机永久持锁，后续所有管控指令报 "another control action is running"。
+    # 2026-09-19 定版：必须用 cpulimit -l 95 包装启动（定制版 SRBMiner 的既定限速形态）。
+    # 实测定案：cpulimit 链 = 2 进程、~600 H/s 稳定；裸/nice 启动会触发矿机自包装出
+    # 第二套 cpulimit+worker，双实例争抢 1 核配额，API 口被管理进程绑走后上报仅 ~65 H/s。
     setsid nohup cpulimit -l 95 -- "$MINER" $ARGS >/dev/null 2>&1 9>&- &
     sleep 3
     pgrep -f "$MINER" >/dev/null 2>&1 || { echo "failed to start"; exit 1; }
