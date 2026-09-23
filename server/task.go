@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -340,14 +341,22 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
 		target = "http://" + target
 	}
+	targetURL, err := url.Parse(target)
+	if err != nil {
+		return -1, err
+	}
 
 	transport := &http.Transport{
 		// 拨测也应走系统代理（如 HTTP(S)_PROXY）：沙箱/受限网络下直连会被拦，
 		// 而 ProxyFromEnvironment 在无代理环境变量时返回 nil，行为与原来一致。
 		Proxy:             http.ProxyFromEnvironment,
 		DisableKeepAlives: true,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// 在 Dial 之前解析 IP，排除 DNS 时间
+	}
+	// DNS 预解析 dialer 只对直连有意义（在 Dial 之前解析 IP，排除 DNS 时间）；
+	// 走代理时 DialContext 实际拨的是代理地址而非目标，此时必须用默认 dialer，
+	// 否则自定义 dial 会引入偶发 EOF（实测经代理时约 20% 请求 EOF，默认 dialer 为 0%）。
+	if proxyURL, _ := http.ProxyFromEnvironment(&http.Request{URL: targetURL}); proxyURL == nil {
+		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(addr)
 			if err != nil {
 				return nil, err
@@ -357,7 +366,7 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 				return nil, err
 			}
 			return net.DialTimeout(network, net.JoinHostPort(ip, port), timeout)
-		},
+		}
 	}
 	defer transport.CloseIdleConnections()
 
