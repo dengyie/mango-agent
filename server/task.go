@@ -344,7 +344,7 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 	transport := &http.Transport{
 		// 拨测也应走系统代理（如 HTTP(S)_PROXY）：沙箱/受限网络下直连会被拦，
 		// 而 ProxyFromEnvironment 在无代理环境变量时返回 nil，行为与原来一致。
-		Proxy:             http.ProxyFromEnvironment(),
+		Proxy:             http.ProxyFromEnvironment,
 		DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			// 在 Dial 之前解析 IP，排除 DNS 时间
