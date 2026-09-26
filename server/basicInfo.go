@@ -58,6 +58,8 @@ func uploadBasicInfo() error {
 		"gpu_name":           monitoring.GpuName(),
 		"virtualization":     monitoring.Virtualized(),
 		"version":            update.CurrentVersion,
+		"miner_configured":   MinerConfigured(),
+		"miner_controllable": MinerControllable(),
 	}
 
 	return tryUploadData(data)

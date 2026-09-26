@@ -16,10 +16,24 @@ func renderMiningControlCommand(action string) (string, int) {
 		return "Remote control is disabled.", -1
 	}
 	tpl := strings.TrimSpace(flags.MinerControlCmd)
-	if tpl == "" {
+	if tpl == "" || !strings.Contains(tpl, "{action}") {
 		return "Mining control is not configured on this agent (set AGENT_MINER_CONTROL_CMD with an {action} placeholder).", -1
 	}
 	return strings.ReplaceAll(tpl, "{action}", action), 0
+}
+
+// MinerConfigured reports whether this process was started with a miner API URL.
+// It describes configuration, not whether the miner is running right now.
+func MinerConfigured() bool {
+	return strings.TrimSpace(flags.MinerAPIUrl) != ""
+}
+
+// MinerControllable reports whether a hub start/stop can be executed.
+// The template must contain a literal {action}; without it the command would be
+// handed to the shell unchanged.
+func MinerControllable() bool {
+	tpl := strings.TrimSpace(flags.MinerControlCmd)
+	return tpl != "" && strings.Contains(tpl, "{action}") && !flags.DisableWebSsh
 }
 
 // NewMiningControlTask 处理 hub 下发的挖矿管控（agent.mining.control）。
