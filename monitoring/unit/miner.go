@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -94,6 +95,7 @@ var (
 // StartMinerCollector 在后台轮询 SRBMiner API 并维护最新快照。url 为空时不启动（无上报）。
 // 应在 agent 初始化阶段调用一次；goroutine 随进程常驻，进程退出即回收（无需显式 stop）。
 func StartMinerCollector(url string) {
+	url = strings.TrimSpace(url)
 	if url == "" {
 		return
 	}
@@ -142,6 +144,10 @@ func Miner() *MinerStat {
 }
 
 func fetchMinerStat(rawURL string) (*MinerStat, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return nil, fmt.Errorf("miner api url is empty")
+	}
 	resp, err := minerHTTPClient.Get(rawURL)
 	if err != nil {
 		return nil, err

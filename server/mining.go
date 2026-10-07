@@ -6,6 +6,11 @@ import (
 	"time"
 )
 
+// miningControlTimeout 只约束 start/stop 模板。systemctl/nssm 卡住时必须回传 -1，
+// 否则 Hub 占位行 exit_code 一直是 null，面板会空等到轮询窗结束。
+// 通用 admin:exec 不走这个上限。
+var miningControlTimeout = 60 * time.Second
+
 // renderMiningControlCommand 校验 action 并渲染命令模板。
 // 返回 (命令或错误说明, 回传 exitCode)；exitCode != 0 表示本次管控未执行。
 func renderMiningControlCommand(action string) (string, int) {
@@ -50,6 +55,6 @@ func NewMiningControlTask(taskID, action string) {
 		return
 	}
 	log.Printf("Mining control %s (task %s): %s", action, taskID, command)
-	result, exitCode := runTaskCommand(command)
+	result, exitCode := runTaskCommandWithTimeout(command, miningControlTimeout)
 	uploadTaskResult(taskID, result, exitCode, time.Now())
 }

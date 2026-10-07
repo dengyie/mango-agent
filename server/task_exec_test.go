@@ -7,7 +7,45 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestRunTaskCommandTimesOutUnix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell script execution test")
+	}
+	start := time.Now()
+	result, exitCode := runTaskCommandWithTimeout("sleep 5", 200*time.Millisecond)
+	elapsed := time.Since(start)
+	if exitCode != -1 {
+		t.Fatalf("timeout should return -1, got %d with %q", exitCode, result)
+	}
+	if !strings.Contains(result, "timed out") {
+		t.Fatalf("timeout result should mention timed out, got %q", result)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("timeout took too long: %s", elapsed)
+	}
+}
+
+func TestRunTaskCommandDoesNotInheritMiningTimeoutUnix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell script execution test")
+	}
+	orig := miningControlTimeout
+	miningControlTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { miningControlTimeout = orig })
+
+	start := time.Now()
+	result, exitCode := runTaskCommand("sleep 0.4")
+	elapsed := time.Since(start)
+	if exitCode != 0 {
+		t.Fatalf("generic exec must not inherit mining timeout, got %d with %q after %s", exitCode, result, elapsed)
+	}
+	if elapsed < 300*time.Millisecond {
+		t.Fatalf("sleep returned too early: %s", elapsed)
+	}
+}
 
 func TestRunTaskCommandMultilineUnix(t *testing.T) {
 	if runtime.GOOS == "windows" {

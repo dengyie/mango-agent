@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -42,8 +43,21 @@ func NewTask(task_id, command string) {
 	uploadTaskResult(task_id, result, exitCode, time.Now())
 }
 
+// runTaskCommand 跑通用远程任务，不设墙钟超时。admin:exec 可能是长诊断，
+// 挖矿管控走 runTaskCommandWithTimeout，避免把 60s 上限误杀普通 RCE。
 func runTaskCommand(command string) (string, int) {
-	cmd, cleanup, err := buildTaskCommand(command)
+	return runTaskCommandWithTimeout(command, 0)
+}
+
+func runTaskCommandWithTimeout(command string, timeout time.Duration) (string, int) {
+	ctx := context.Background()
+	cancel := func() {}
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), timeout)
+	}
+	defer cancel()
+
+	cmd, cleanup, err := buildTaskCommandWithContext(ctx, command)
 	if err != nil {
 		return err.Error(), -1
 	}
@@ -60,6 +74,10 @@ func runTaskCommand(command string) (string, int) {
 		result = appendErrorResult(result, stderr.String())
 	}
 	result = strings.ReplaceAll(result, "\r\n", "\n")
+	if timeout > 0 && ctx.Err() == context.DeadlineExceeded {
+		result = appendErrorResult(result, fmt.Sprintf("command timed out after %s", timeout))
+		return result, -1
+	}
 	exitCode := 0
 	if err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok {
@@ -74,6 +92,13 @@ func runTaskCommand(command string) (string, int) {
 }
 
 func buildTaskCommand(command string) (*exec.Cmd, func(), error) {
+	return buildTaskCommandWithContext(context.Background(), command)
+}
+
+func buildTaskCommandWithContext(ctx context.Context, command string) (*exec.Cmd, func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		scriptFile, err := os.CreateTemp("", "komari-task-*.ps1")
@@ -98,12 +123,13 @@ func buildTaskCommand(command string) (*exec.Cmd, func(), error) {
 			cleanup()
 			return nil, func() {}, err
 		}
-		cmd = exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptFile.Name())
+		cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptFile.Name())
+		configureTaskCommand(cmd)
 		return cmd, cleanup, nil
-	} else {
-		cmd = exec.Command("sh", "-s")
-		cmd.Stdin = strings.NewReader(command)
 	}
+	cmd = exec.CommandContext(ctx, "sh", "-s")
+	cmd.Stdin = strings.NewReader(command)
+	configureTaskCommand(cmd)
 	return cmd, func() {}, nil
 }
 

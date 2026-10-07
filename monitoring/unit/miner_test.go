@@ -164,6 +164,99 @@ func resetMinerFetchTime() {
 	minerMu.Unlock()
 }
 
+func TestMinerClearsCacheAfterConsecutiveFailures(t *testing.T) {
+	resetMinerState(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(srbV2Sample))
+	}))
+	collectMinerOnce(srv.URL + "/api/v2/status")
+	srv.Close()
+	if Miner() == nil {
+		t.Fatal("expected cached stat after first collect")
+	}
+	for i := 0; i < minerMaxFails; i++ {
+		collectMinerOnce("http://127.0.0.1:1/missing")
+		if Miner() == nil {
+			t.Fatalf("cache should survive fail %d/%d", i+1, minerMaxFails)
+		}
+	}
+	collectMinerOnce("http://127.0.0.1:1/missing")
+	if got := Miner(); got != nil {
+		t.Fatalf("Miner() after %d consecutive fails = %#v, want nil", minerMaxFails+1, got)
+	}
+}
+
+func TestMinerClearsCacheWhenSnapshotStale(t *testing.T) {
+	resetMinerState(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(srbV2Sample))
+	}))
+	defer srv.Close()
+	collectMinerOnce(srv.URL + "/api/v2/status")
+	if Miner() == nil {
+		t.Fatal("expected cached stat")
+	}
+	minerMu.Lock()
+	lastMinerFetch = time.Now().Add(-(minerStaleAfter + time.Second))
+	minerMu.Unlock()
+	if got := Miner(); got != nil {
+		t.Fatalf("stale snapshot should be nil, got %#v", got)
+	}
+}
+
+func TestMinerParsesCPUOnlyStatus(t *testing.T) {
+	resetMinerState(t)
+	const cpuOnly = `{
+	  "rig_name":"cue",
+	  "algorithms":[
+	    {"name":"xelishashv3",
+	     "pool":{"pool":"10.144.144.2:7019","wallet":"krxXGNKMD4/vps-cue-1","latency":12},
+	     "shares":{"total":1,"accepted":1,"rejected":0},
+	     "hashrate":{"1min":3276.4,"1hr":3100.0}}
+	  ]
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(cpuOnly))
+	}))
+	defer srv.Close()
+	collectMinerOnce(srv.URL)
+	stat := Miner()
+	if stat == nil {
+		t.Fatal("CPU-only status should parse")
+	}
+	if stat.Algorithm != "xelishashv3" || stat.Hashrate1Min != 3276.4 || stat.SharesValid != 1 {
+		t.Fatalf("CPU-only parse mismatch: %#v", stat)
+	}
+	if stat.PowerW != 0 || stat.Temperature != 0 {
+		t.Fatalf("CPU-only should leave GPU fields zero: %#v", stat)
+	}
+}
+
+func TestStartMinerCollectorIgnoresBlankURL(t *testing.T) {
+	resetMinerState(t)
+	StartMinerCollector("   ")
+	time.Sleep(50 * time.Millisecond)
+	if got := Miner(); got != nil {
+		t.Fatalf("blank URL must not start collector, got %#v", got)
+	}
+}
+
+func TestStartMinerCollectorTrimsURL(t *testing.T) {
+	resetMinerState(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(srbV2Sample))
+	}))
+	t.Cleanup(srv.Close)
+	collectMinerOnce("  " + srv.URL + "/api/v2/status  ")
+	if Miner() == nil {
+		t.Fatal("collector URL must TrimSpace before GET")
+	}
+}
+
 func TestMinerRejectsEmptyAlgorithms(t *testing.T) {
 	resetMinerState(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
