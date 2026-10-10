@@ -20,6 +20,7 @@ import (
 	"github.com/komari-monitor/komari-agent/monitoring/netstatic"
 	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
 	"github.com/komari-monitor/komari-agent/server"
+	"github.com/komari-monitor/komari-agent/sshauth"
 	"github.com/komari-monitor/komari-agent/update"
 	"github.com/spf13/cobra"
 
@@ -152,8 +153,14 @@ var RootCmd = &cobra.Command{
 				shutdown.shutdown(42)
 			})
 		}
-		go server.DoUploadBasicInfoWorks()
-		// 后台采集矿工状态（AGENT_MINER_API_URL 未配置时不启动）。独立 goroutine，
+			go server.DoUploadBasicInfoWorks()
+			// 启动 SSH 租约自愈对账（扫描 authorized_keys 中可能残留的过期租约并重置未过期定时器）
+			if pruned, err := sshauth.ReconcileLeases(""); err != nil {
+				log.Println("[sshauth] Initial lease reconcile warning:", err)
+			} else if pruned > 0 {
+				log.Printf("[sshauth] Initial lease reconcile cleaned %d stale keys", pruned)
+			}
+			// 后台采集矿工状态（AGENT_MINER_API_URL 未配置时不启动）。独立 goroutine，
 		// 与上报热路径解耦：Miner() 只非阻塞读缓存，矿工 API 慢/挂不影响其他指标上报。
 		monitoring.StartMinerCollector(flags.MinerAPIUrl)
 		for {

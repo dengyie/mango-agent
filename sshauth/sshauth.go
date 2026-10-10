@@ -8,13 +8,14 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 var (
-	leaseMu    sync.Mutex
+	leaseMu     sync.Mutex
 	leaseTimers = make(map[string]*time.Timer)
 )
 
@@ -58,6 +59,47 @@ func ResolveAuthorizedKeysPath(targetUsername string) (string, error) {
 	return filepath.Join(homeDir, ".ssh", "authorized_keys"), nil
 }
 
+// writeAuthorizedKeysAtomic 使用临时文件 + fsync + 原子 Rename 确保授权文件写入不发生损坏
+func writeAuthorizedKeysAtomic(authPath string, content []byte) error {
+	dir := filepath.Dir(authPath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create auth dir %s: %w", dir, err)
+	}
+
+	tmpFile, err := os.CreateTemp(dir, "authkeys-tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp auth file: %w", err)
+	}
+	tmpName := tmpFile.Name()
+
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpName)
+	}()
+
+	if err := tmpFile.Chmod(0600); err != nil {
+		return fmt.Errorf("chmod temp auth file: %w", err)
+	}
+
+	if _, err := tmpFile.Write(content); err != nil {
+		return fmt.Errorf("write temp auth file: %w", err)
+	}
+
+	if err := tmpFile.Sync(); err != nil {
+		return fmt.Errorf("fsync temp auth file: %w", err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close temp auth file: %w", err)
+	}
+
+	if err := os.Rename(tmpName, authPath); err != nil {
+		return fmt.Errorf("atomic rename auth file: %w", err)
+	}
+
+	return nil
+}
+
 // AuthorizeKey 将指定的公钥以租约形式注入 authorized_keys，并配置过期时间
 func AuthorizeKey(ticketID, pubKey, targetUser string, expiresAt time.Time) error {
 	if ticketID == "" || pubKey == "" {
@@ -69,16 +111,15 @@ func AuthorizeKey(ticketID, pubKey, targetUser string, expiresAt time.Time) erro
 		return fmt.Errorf("resolve authorized_keys path: %w", err)
 	}
 
+	return authorizeKeyAtPath(authPath, ticketID, pubKey, targetUser, expiresAt)
+}
+
+func authorizeKeyAtPath(authPath, ticketID, pubKey, targetUser string, expiresAt time.Time) error {
 	leaseMu.Lock()
 	defer leaseMu.Unlock()
 
 	// 先清理可能存在的同 ticket_id 旧租约（保证幂等性）
 	_ = removeKeyByTicketLocked(authPath, ticketID)
-
-	dir := filepath.Dir(authPath)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("create .ssh dir: %w", err)
-	}
 
 	// 读取现有内容
 	var lines []string
@@ -94,9 +135,9 @@ func AuthorizeKey(ticketID, pubKey, targetUser string, expiresAt time.Time) erro
 	keyLine := strings.TrimSpace(pubKey)
 	lines = append(lines, tagLine, keyLine)
 
-	// 写回文件
+	// 原子写回文件
 	outContent := strings.Join(lines, "\n") + "\n"
-	if err := os.WriteFile(authPath, []byte(outContent), 0600); err != nil {
+	if err := writeAuthorizedKeysAtomic(authPath, []byte(outContent)); err != nil {
 		return fmt.Errorf("write authorized_keys: %w", err)
 	}
 
@@ -111,7 +152,7 @@ func AuthorizeKey(ticketID, pubKey, targetUser string, expiresAt time.Time) erro
 		remaining = 5 * time.Second
 	}
 	leaseTimers[ticketID] = time.AfterFunc(remaining, func() {
-		RevokeKey(ticketID, targetUser)
+		_ = RevokeKey(ticketID, targetUser)
 	})
 
 	return nil
@@ -124,6 +165,10 @@ func RevokeKey(ticketID, targetUser string) error {
 		return fmt.Errorf("resolve authorized_keys path: %w", err)
 	}
 
+	return revokeKeyAtPath(authPath, ticketID)
+}
+
+func revokeKeyAtPath(authPath, ticketID string) error {
 	leaseMu.Lock()
 	defer leaseMu.Unlock()
 
@@ -161,7 +206,9 @@ func removeKeyByTicketLocked(authPath, ticketID string) error {
 		}
 		if skipNextKey {
 			skipNextKey = false
-			continue
+			if !strings.HasPrefix(trimmed, leaseTagPrefix) {
+				continue
+			}
 		}
 		if trimmed != "" {
 			newLines = append(newLines, line)
@@ -176,9 +223,118 @@ func removeKeyByTicketLocked(authPath, ticketID string) error {
 	if len(newLines) > 0 {
 		outContent = strings.Join(newLines, "\n") + "\n"
 	}
-	if err := os.WriteFile(authPath, []byte(outContent), 0600); err != nil {
+	if err := writeAuthorizedKeysAtomic(authPath, []byte(outContent)); err != nil {
 		return err
 	}
 	log.Printf("[sshauth] Revoked and pruned SSH key for ticket %s from %s", ticketID, authPath)
 	return nil
+}
+
+// ReconcileLeases 启动自愈对账：扫描 authorized_keys 中残留的租约标记。
+// 若已过期，则立即安全抹除该公钥；若尚未过期，则恢复其后台自动注销定时器。
+// 彻底解决由于 Agent 重启、机器崩溃导致的租约定时器丢失与后门残留问题！
+func ReconcileLeases(targetUser string) (int, error) {
+	authPath, err := ResolveAuthorizedKeysPath(targetUser)
+	if err != nil {
+		return 0, fmt.Errorf("resolve authorized_keys path: %w", err)
+	}
+
+	return reconcileLeasesAtPath(authPath, targetUser)
+}
+
+func reconcileLeasesAtPath(authPath, targetUser string) (int, error) {
+	leaseMu.Lock()
+	defer leaseMu.Unlock()
+
+	if _, err := os.Stat(authPath); os.IsNotExist(err) {
+		return 0, nil
+	}
+
+	fileBytes, err := os.ReadFile(authPath)
+	if err != nil {
+		return 0, err
+	}
+
+	now := time.Now().Unix()
+	lines := strings.Split(string(fileBytes), "\n")
+	var newLines []string
+	expiredTickets := make(map[string]struct{})
+	activeLeases := make(map[string]int64) // ticketID -> expUnix
+
+	skipNext := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, leaseTagPrefix) {
+			parts := strings.Fields(trimmed)
+			// Format: # MANGOHUB_TICKET:<ticket_id> EXP:<unix>
+			ticketID := ""
+			expUnix := int64(0)
+			for _, p := range parts {
+				if strings.HasPrefix(p, "MANGOHUB_TICKET:") {
+					ticketID = strings.TrimPrefix(p, "MANGOHUB_TICKET:")
+				} else if strings.HasPrefix(p, "EXP:") {
+					expUnix, _ = strconv.ParseInt(strings.TrimPrefix(p, "EXP:"), 10, 64)
+				}
+			}
+
+			if ticketID == "" {
+				newLines = append(newLines, line)
+				continue
+			}
+
+			if expUnix > 0 && expUnix <= now {
+				expiredTickets[ticketID] = struct{}{}
+				skipNext = true
+				continue
+			} else if expUnix > now {
+				activeLeases[ticketID] = expUnix
+			}
+		}
+
+		if skipNext {
+			skipNext = false
+			if !strings.HasPrefix(trimmed, leaseTagPrefix) {
+				continue
+			}
+		}
+
+		if trimmed != "" {
+			newLines = append(newLines, line)
+		}
+	}
+
+	// 如果有过期租约被清理，原子写回文件
+	if len(expiredTickets) > 0 {
+		outContent := ""
+		if len(newLines) > 0 {
+			outContent = strings.Join(newLines, "\n") + "\n"
+		}
+		if err := writeAuthorizedKeysAtomic(authPath, []byte(outContent)); err != nil {
+			return 0, err
+		}
+		log.Printf("[sshauth] Reconcile cleaned %d expired SSH leases from %s", len(expiredTickets), authPath)
+	}
+
+	// 为尚未过期的租约恢复定时器
+	rearmed := 0
+	for ticketID, expUnix := range activeLeases {
+		if _, exists := leaseTimers[ticketID]; exists {
+			continue
+		}
+		tID := ticketID
+		rem := time.Until(time.Unix(expUnix, 0))
+		if rem <= 0 {
+			rem = 1 * time.Second
+		}
+		leaseTimers[tID] = time.AfterFunc(rem, func() {
+			_ = RevokeKey(tID, targetUser)
+		})
+		rearmed++
+	}
+
+	if rearmed > 0 {
+		log.Printf("[sshauth] Reconcile re-armed %d active SSH lease timers", rearmed)
+	}
+
+	return len(expiredTickets), nil
 }
