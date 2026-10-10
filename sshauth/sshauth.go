@@ -49,18 +49,24 @@ func ResolveAuthorizedKeysPath(targetUsername string) (string, error) {
 		}
 	}
 	if homeDir == "" {
-		var err error
-		homeDir, err = os.UserHomeDir()
-		if err != nil {
-			return "", err
+		if u, err := user.Current(); err == nil && u.HomeDir != "" {
+			homeDir = u.HomeDir
+		} else if h, err := os.UserHomeDir(); err == nil && h != "" {
+			homeDir = h
+		} else if os.Geteuid() == 0 {
+			homeDir = "/root"
 		}
+	}
+	if homeDir == "" {
+		return "", fmt.Errorf("cannot resolve home directory for user %q", targetUsername)
 	}
 
 	return filepath.Join(homeDir, ".ssh", "authorized_keys"), nil
 }
 
-// writeAuthorizedKeysAtomic 使用临时文件 + fsync + 原子 Rename 确保授权文件写入不发生损坏
-func writeAuthorizedKeysAtomic(authPath string, content []byte) error {
+// writeAuthorizedKeysAtomic 使用临时文件 + fsync + 原子 Rename 确保授权文件写入不发生损坏，
+// 并自动继承或设置文件属主属组，杜绝在 root 权限下写入导致 OpenSSH StrictModes 校验失败。
+func writeAuthorizedKeysAtomic(authPath string, content []byte, targetUser string) error {
 	dir := filepath.Dir(authPath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create auth dir %s: %w", dir, err)
@@ -79,6 +85,12 @@ func writeAuthorizedKeysAtomic(authPath string, content []byte) error {
 
 	if err := tmpFile.Chmod(0600); err != nil {
 		return fmt.Errorf("chmod temp auth file: %w", err)
+	}
+
+	// 继承或设置目标属主属组
+	uid, gid := getTargetOwnership(authPath, targetUser)
+	if uid >= 0 && gid >= 0 {
+		_ = setFileOwner(tmpName, uid, gid)
 	}
 
 	if _, err := tmpFile.Write(content); err != nil {
@@ -119,7 +131,7 @@ func authorizeKeyAtPath(authPath, ticketID, pubKey, targetUser string, expiresAt
 	defer leaseMu.Unlock()
 
 	// 先清理可能存在的同 ticket_id 旧租约（保证幂等性）
-	_ = removeKeyByTicketLocked(authPath, ticketID)
+	_ = removeKeyByTicketLocked(authPath, ticketID, targetUser)
 
 	// 读取现有内容
 	var lines []string
@@ -137,7 +149,7 @@ func authorizeKeyAtPath(authPath, ticketID, pubKey, targetUser string, expiresAt
 
 	// 原子写回文件
 	outContent := strings.Join(lines, "\n") + "\n"
-	if err := writeAuthorizedKeysAtomic(authPath, []byte(outContent)); err != nil {
+	if err := writeAuthorizedKeysAtomic(authPath, []byte(outContent), targetUser); err != nil {
 		return fmt.Errorf("write authorized_keys: %w", err)
 	}
 
@@ -160,15 +172,39 @@ func authorizeKeyAtPath(authPath, ticketID, pubKey, targetUser string, expiresAt
 
 // RevokeKey 从 authorized_keys 中注销并删除指定 ticketID 的公钥与标记
 func RevokeKey(ticketID, targetUser string) error {
-	authPath, err := ResolveAuthorizedKeysPath(targetUser)
-	if err != nil {
-		return fmt.Errorf("resolve authorized_keys path: %w", err)
+	if targetUser != "" {
+		authPath, err := ResolveAuthorizedKeysPath(targetUser)
+		if err != nil {
+			return fmt.Errorf("resolve authorized_keys path: %w", err)
+		}
+		return revokeKeyAtPath(authPath, ticketID, targetUser)
 	}
 
-	return revokeKeyAtPath(authPath, ticketID)
+	// targetUser 未知时，按默认路径注销；在 Unix 下额外扫描所有用户目录
+	var firstErr error
+	if defaultPath, err := ResolveAuthorizedKeysPath(""); err == nil {
+		if err := revokeKeyAtPath(defaultPath, ticketID, ""); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	if runtime.GOOS != "windows" {
+		userKeys, _ := filepath.Glob("/home/*/.ssh/authorized_keys")
+		for _, p := range userKeys {
+			parts := strings.Split(p, string(filepath.Separator))
+			uName := ""
+			if len(parts) >= 3 {
+				uName = parts[2]
+			}
+			_ = revokeKeyAtPath(p, ticketID, uName)
+		}
+		_ = revokeKeyAtPath("/root/.ssh/authorized_keys", ticketID, "root")
+	}
+
+	return firstErr
 }
 
-func revokeKeyAtPath(authPath, ticketID string) error {
+func revokeKeyAtPath(authPath, ticketID, targetUser string) error {
 	leaseMu.Lock()
 	defer leaseMu.Unlock()
 
@@ -177,10 +213,10 @@ func revokeKeyAtPath(authPath, ticketID string) error {
 		delete(leaseTimers, ticketID)
 	}
 
-	return removeKeyByTicketLocked(authPath, ticketID)
+	return removeKeyByTicketLocked(authPath, ticketID, targetUser)
 }
 
-func removeKeyByTicketLocked(authPath, ticketID string) error {
+func removeKeyByTicketLocked(authPath, ticketID, targetUser string) error {
 	if _, err := os.Stat(authPath); os.IsNotExist(err) {
 		return nil
 	}
@@ -223,7 +259,7 @@ func removeKeyByTicketLocked(authPath, ticketID string) error {
 	if len(newLines) > 0 {
 		outContent = strings.Join(newLines, "\n") + "\n"
 	}
-	if err := writeAuthorizedKeysAtomic(authPath, []byte(outContent)); err != nil {
+	if err := writeAuthorizedKeysAtomic(authPath, []byte(outContent), targetUser); err != nil {
 		return err
 	}
 	log.Printf("[sshauth] Revoked and pruned SSH key for ticket %s from %s", ticketID, authPath)
@@ -234,12 +270,56 @@ func removeKeyByTicketLocked(authPath, ticketID string) error {
 // 若已过期，则立即安全抹除该公钥；若尚未过期，则恢复其后台自动注销定时器。
 // 彻底解决由于 Agent 重启、机器崩溃导致的租约定时器丢失与后门残留问题！
 func ReconcileLeases(targetUser string) (int, error) {
-	authPath, err := ResolveAuthorizedKeysPath(targetUser)
-	if err != nil {
-		return 0, fmt.Errorf("resolve authorized_keys path: %w", err)
+	if targetUser != "" {
+		authPath, err := ResolveAuthorizedKeysPath(targetUser)
+		if err != nil {
+			return 0, fmt.Errorf("resolve authorized_keys path: %w", err)
+		}
+		return reconcileLeasesAtPath(authPath, targetUser)
 	}
 
-	return reconcileLeasesAtPath(authPath, targetUser)
+	// targetUser 为空时（常用于启动自愈）：
+	// 1. 扫描当前/默认用户 authorized_keys
+	totalCleaned := 0
+	defaultPath, err := ResolveAuthorizedKeysPath("")
+	if err == nil {
+		if cleaned, _ := reconcileLeasesAtPath(defaultPath, ""); cleaned > 0 {
+			totalCleaned += cleaned
+		}
+	}
+
+	// 2. 在 Unix 系统下，额外扫描系统所有真实用户的 /home/*/.ssh/authorized_keys 以及 /root/.ssh/authorized_keys
+	if runtime.GOOS != "windows" {
+		scannedPaths := make(map[string]struct{})
+		if defaultPath != "" {
+			scannedPaths[defaultPath] = struct{}{}
+		}
+
+		userKeys, _ := filepath.Glob("/home/*/.ssh/authorized_keys")
+		for _, p := range userKeys {
+			if _, seen := scannedPaths[p]; seen {
+				continue
+			}
+			scannedPaths[p] = struct{}{}
+			parts := strings.Split(p, string(filepath.Separator))
+			uName := ""
+			if len(parts) >= 3 {
+				uName = parts[2]
+			}
+			if cleaned, _ := reconcileLeasesAtPath(p, uName); cleaned > 0 {
+				totalCleaned += cleaned
+			}
+		}
+
+		rootKey := "/root/.ssh/authorized_keys"
+		if _, seen := scannedPaths[rootKey]; !seen {
+			if cleaned, _ := reconcileLeasesAtPath(rootKey, "root"); cleaned > 0 {
+				totalCleaned += cleaned
+			}
+		}
+	}
+
+	return totalCleaned, nil
 }
 
 func reconcileLeasesAtPath(authPath, targetUser string) (int, error) {
@@ -309,7 +389,7 @@ func reconcileLeasesAtPath(authPath, targetUser string) (int, error) {
 		if len(newLines) > 0 {
 			outContent = strings.Join(newLines, "\n") + "\n"
 		}
-		if err := writeAuthorizedKeysAtomic(authPath, []byte(outContent)); err != nil {
+		if err := writeAuthorizedKeysAtomic(authPath, []byte(outContent), targetUser); err != nil {
 			return 0, err
 		}
 		log.Printf("[sshauth] Reconcile cleaned %d expired SSH leases from %s", len(expiredTickets), authPath)
@@ -322,12 +402,13 @@ func reconcileLeasesAtPath(authPath, targetUser string) (int, error) {
 			continue
 		}
 		tID := ticketID
+		uUser := targetUser
 		rem := time.Until(time.Unix(expUnix, 0))
 		if rem <= 0 {
 			rem = 1 * time.Second
 		}
 		leaseTimers[tID] = time.AfterFunc(rem, func() {
-			_ = RevokeKey(tID, targetUser)
+			_ = RevokeKey(tID, uUser)
 		})
 		rearmed++
 	}
