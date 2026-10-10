@@ -18,6 +18,7 @@ import (
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/monitoring"
 	v2 "github.com/komari-monitor/komari-agent/protocol/v2"
+	"github.com/komari-monitor/komari-agent/sshauth"
 	"github.com/komari-monitor/komari-agent/terminal"
 	"github.com/komari-monitor/komari-agent/utils"
 	"github.com/komari-monitor/komari-agent/ws"
@@ -417,16 +418,40 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 	case v2.MethodAgentMessage, v2.MethodAgentEvent:
 		log.Printf("received v2 %s: %+v", method, params)
 		return true
-	case v2.MethodAgentFile:
-		var operation v2.FileOperation
-		if err := v2.BindParams(params, &operation); err == nil {
-			go handleFileOperation(operation)
-			return true
-		} else {
-			log.Printf("bad v2 file params: %v", err)
-		}
-	default:
-		log.Printf("unknown v2 event method %s", method)
+		case v2.MethodAgentFile:
+			var operation v2.FileOperation
+			if err := v2.BindParams(params, &operation); err == nil {
+				go handleFileOperation(operation)
+				return true
+			} else {
+				log.Printf("bad v2 file params: %v", err)
+			}
+		case v2.MethodAgentSSHAuthorize:
+			var p v2.SSHAuthorizeParams
+			if err := v2.BindParams(params, &p); err == nil {
+				go func() {
+					if err := sshauth.AuthorizeKey(p.TicketID, p.PublicKey, p.TargetUser, p.ExpiresAt); err != nil {
+						log.Printf("[sshauth] Failed to authorize ticket %s: %v", p.TicketID, err)
+					}
+				}()
+				return true
+			} else {
+				log.Printf("bad v2 ssh authorize params: %v", err)
+			}
+		case v2.MethodAgentSSHRevoke:
+			var p v2.SSHRevokeParams
+			if err := v2.BindParams(params, &p); err == nil {
+				go func() {
+					if err := sshauth.RevokeKey(p.TicketID, ""); err != nil {
+						log.Printf("[sshauth] Failed to revoke ticket %s: %v", p.TicketID, err)
+					}
+				}()
+				return true
+			} else {
+				log.Printf("bad v2 ssh revoke params: %v", err)
+			}
+		default:
+			log.Printf("unknown v2 event method %s", method)
 	}
 	return false
 }

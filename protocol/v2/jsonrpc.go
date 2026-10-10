@@ -20,7 +20,21 @@ const (
 	MethodAgentPull          = "agent.pull"
 	MethodAgentFile          = "agent.file"
 	MethodAgentFileResult    = "agent.file.result"
+	MethodAgentSSHAuthorize  = "agent.ssh.authorize"
+	MethodAgentSSHRevoke     = "agent.ssh.revoke"
 )
+
+type SSHAuthorizeParams struct {
+	TicketID   string    `json:"ticket_id"`
+	PublicKey  string    `json:"public_key"`
+	TargetUser string    `json:"target_user,omitempty"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	SourceUUID string    `json:"source_uuid,omitempty"`
+}
+
+type SSHRevokeParams struct {
+	TicketID string `json:"ticket_id"`
+}
 
 type Request struct {
 	JSONRPC string      `json:"jsonrpc"`
